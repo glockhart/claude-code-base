@@ -1,0 +1,4 @@
+proxy/allowlist.local.conf
+*.local
+.env
+.DS_Store

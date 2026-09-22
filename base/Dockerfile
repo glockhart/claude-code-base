@@ -1,0 +1,75 @@
+# syntax=docker/dockerfile:1.7
+# Claude Code sandbox base image.
+#
+# Deliberately absent: sudo, iptables, ipset. Egress is enforced outside this
+# container by the Squid sidecar, so nothing in here needs to touch the network
+# stack, and every one of those tools would only help an attacker.
+#
+# The agent is non-root with no sudo, so it cannot run apt at all. apt works
+# only at image-build time, where the build container is on the normal bridge
+# with ordinary egress. That is why no proxy address is baked into the image.
+
+ARG NODE_IMAGE=node:22-bookworm-slim
+FROM ${NODE_IMAGE}
+
+ARG CLAUDE_CODE_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
+
+# --- tooling -----------------------------------------------------------------
+# Only what the sandbox itself needs, or what is useful in ANY repository.
+# Language toolchains belong in per-project images layered on top of this one.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl git git-lfs openssh-client \
+        less jq ripgrep fd-find unzip xz-utils procps \
+        gosu tini vim-tiny bash-completion iproute2; \
+    rm -rf /var/lib/apt/lists/*
+
+# --- the agent ---------------------------------------------------------------
+# Pinned exactly. The version check forces any lazy post-install download to
+# happen NOW, while the build still has network, and fails loudly if the
+# registry handed us something other than what we asked for.
+RUN set -eux; \
+    test -n "${CLAUDE_CODE_VERSION}"; \
+    npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+    npm cache clean --force; \
+    claude --version | grep -q "${CLAUDE_CODE_VERSION}"
+
+# --- identity ----------------------------------------------------------------
+# The node image already ships a `node` user at 1000:1000. Rename it rather than
+# creating a second 1000, which would make the uid ambiguous.
+RUN set -eux; \
+    groupmod -n claude node; \
+    usermod -l claude -d /home/claude -m node; \
+    mkdir -p /home/claude/.claude /home/claude/.cache /workspace; \
+    chown -R claude:claude /home/claude /workspace
+
+# --- hardening ----------------------------------------------------------------
+# Debian ships su, mount, passwd, chfn, gpasswd, ssh-keysign and friends setuid
+# root. no-new-privileges already blocks escalation through them, but stripping
+# the bits removes the class entirely and nothing here needs them: the agent is
+# non-root, there is no sudo, and gosu is not setuid.
+RUN set -eux; \
+    find / -xdev -perm /6000 -type f -exec chmod ug-s {} + 2>/dev/null || true; \
+    test -z "$(find / -xdev -perm -4000 -type f 2>/dev/null)"
+
+# --- baked configuration -----------------------------------------------------
+COPY rootfs/ /
+RUN set -eux; \
+    chmod 0444 /etc/claude-code/managed-settings.json; \
+    chmod 0555 /usr/local/bin/sandbox-secret-guard /usr/local/bin/sandbox-preflight
+COPY --chmod=0555 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+ENV CLAUDE_CONFIG_DIR=/home/claude/.claude \
+    HOME=/home/claude \
+    NODE_OPTIONS=--use-system-ca \
+    npm_config_cache=/home/claude/.cache/npm \
+    EDITOR=vi \
+    SHELL=/bin/bash
+
+WORKDIR /workspace
+USER claude
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
+CMD ["claude"]

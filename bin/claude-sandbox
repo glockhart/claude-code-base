@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# shellcheck source=/dev/null
+# claude-sandbox - run Claude Code against the current repo inside a disposable,
+# network-restricted container.
+#
+# Usage:
+#   claude-sandbox [flags] [-- claude args...]
+#   claude-sandbox proxy up|down|logs|reload
+#   claude-sandbox login | logout | doctor
+#
+# Flags:
+#   --yolo             skip permission prompts (refuses unless egress is restricted)
+#   --shell            drop to bash instead of launching the agent
+#   --offline          no network at all, plus the stricter managed-settings profile
+#   --with-ssh-agent   forward the ssh agent socket for this run (see docs)
+#   --env-file FILE    inject secrets for this run only
+#   --image NAME       override image selection
+#   --rebuild          force a rebuild of the per-project image
+#
+# Safe to symlink into ~/.local/bin.
+set -euo pipefail
+
+# ------------------------------------------------------------- bootstrap ----
+resolve_root() {                    # readlink -f is not portable to older macOS
+  local src=${BASH_SOURCE[0]} dir
+  while [ -L "$src" ]; do
+    dir=$(cd -P "$(dirname "$src")" && pwd); src=$(readlink "$src")
+    case $src in /*) ;; *) src="$dir/$src" ;; esac
+  done
+  cd -P "$(dirname "$src")/.." && pwd
+}
+ROOT=${CLAUDE_SANDBOX_ROOT:-$(resolve_root)}
+[ -f "$ROOT/versions.env" ] || { echo "claude-sandbox: cannot find versions.env (set CLAUDE_SANDBOX_ROOT)" >&2; exit 1; }
+set -a; . "$ROOT/versions.env"
+[ -f "$HOME/.config/claude-sandbox/config" ] && . "$HOME/.config/claude-sandbox/config"
+set +a
+
+die()  { printf '\033[31mclaude-sandbox:\033[0m %s\n' "$*" >&2; exit 1; }
+info() { printf '\033[2m[sandbox]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[33m[sandbox]\033[0m %s\n' "$*" >&2; }
+sha()  { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
+
+COMPOSE=(docker compose -f "$ROOT/compose/egress.yml")
+
+proxy_is_healthy() {
+  [ "$(docker inspect -f '{{.State.Health.Status}}' claude-egress-proxy 2>/dev/null)" = healthy ]
+}
+
+# ----------------------------------------------------------- subcommands ----
+case ${1-} in
+  proxy) shift
+    case ${1-up} in
+      up)     exec "${COMPOSE[@]}" up -d --build --wait ;;
+      down)   exec "${COMPOSE[@]}" down ;;
+      logs)   exec "${COMPOSE[@]}" logs -f proxy ;;
+      reload) exec docker exec claude-egress-proxy squid -k reconfigure ;;
+      *)      die "proxy: expected up, down, logs or reload" ;;
+    esac ;;
+  logout) docker volume rm -f "$AUTH_VOLUME" >/dev/null && info "auth volume removed"; exit 0 ;;
+  doctor) shift; exec "$ROOT/test/doctor.sh" "$@" ;;
+  login)  shift; set -- --login "$@" ;;
+  -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+# ----------------------------------------------------------------- flags ----
+YOLO=0 SHELL_MODE=0 OFFLINE=0 WITH_SSH=0 REBUILD=0 LOGIN=0
+ENV_FILES=() PASSTHRU=()
+while [ $# -gt 0 ]; do
+  case $1 in
+    --yolo)           YOLO=1 ;;
+    --shell)          SHELL_MODE=1 ;;
+    --offline)        OFFLINE=1 ;;
+    --with-ssh-agent) WITH_SSH=1 ;;
+    --rebuild)        REBUILD=1 ;;
+    --login)          LOGIN=1 ;;
+    --env-file)       [ $# -ge 2 ] || die "--env-file needs a path"
+                      [ -f "$2" ] || die "--env-file: no such file: $2"
+                      ENV_FILES+=("$2"); shift ;;
+    --image)          [ $# -ge 2 ] || die "--image needs a name"; CLAUDE_SANDBOX_IMAGE=$2; shift ;;
+    --)               shift; PASSTHRU+=("$@"); break ;;
+    *)                PASSTHRU+=("$1") ;;
+  esac
+  shift
+done
+
+# --------------------------------------------------------------- project ----
+PROJECT_DIR=$PWD
+if git rev-parse --show-toplevel >/dev/null 2>&1; then
+  PROJECT_DIR=$(git rev-parse --show-toplevel)
+fi
+PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd -P)
+PROJECT=$(basename "$PROJECT_DIR")
+REL=${PWD#"$PROJECT_DIR"}; REL=${REL#/}
+
+# The workspace goes to /workspace/<project>, never a bare /workspace. Session
+# transcripts are keyed by working directory, so a shared path would merge every
+# project's history into one bucket and make --resume offer the wrong sessions.
+WORKSPACE=/workspace/$PROJECT
+WORKDIR=$WORKSPACE${REL:+/$REL}
+
+# Launcher knobs only (cpus, memory, image). Secrets require --env-file, which
+# is a separate mechanism with a separate name, on purpose.
+[ -f "$PROJECT_DIR/.claude-sandbox.env" ] && { set -a; . "$PROJECT_DIR/.claude-sandbox.env"; set +a; }
+
+# ----------------------------------------------------------------- image ----
+IMAGE=${CLAUDE_SANDBOX_IMAGE:-${BASE_IMAGE_NAME}:${CLAUDE_CODE_VERSION}}
+CTX=$PROJECT_DIR/.claude-sandbox
+if [ -f "$CTX/Dockerfile" ] && [ -z "${CLAUDE_SANDBOX_IMAGE:-}" ]; then
+  # Content-address the project image so editing the Dockerfile rebuilds on the
+  # next run and an unchanged one never does.
+  h=$( (cd "$CTX" && find . -type f | LC_ALL=C sort | while read -r f; do sha <"$f"; done) | sha | cut -c1-12)
+  IMAGE="claude-sandbox/${PROJECT}:${CLAUDE_CODE_VERSION}-${h}"
+  if [ "$REBUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    info "building project image $IMAGE"
+    docker build --build-arg "BASE_IMAGE=${BASE_IMAGE_NAME}:${CLAUDE_CODE_VERSION}" \
+                 -t "$IMAGE" -f "$CTX/Dockerfile" "$CTX"
+  fi
+fi
+docker image inspect "$IMAGE" >/dev/null 2>&1 \
+  || die "image $IMAGE not found. Run: make -C $ROOT build"
+
+# -------------------------------------------------------------- identity ----
+# cap_drop ALL and a runtime uid remap are mutually exclusive: chown needs
+# CAP_CHOWN and dropping privileges needs CAP_SETUID/SETGID. Two profiles.
+ENV_ARGS=() MOUNTS=()
+if [ "$(uname -s)" = Darwin ] || { [ "$(id -u)" = 1000 ] && [ "$(id -g)" = 1000 ]; }; then
+  # Profile A: nothing to remap, so the container never holds root at all.
+  USER_ARGS=(--user 1000:1000)
+  CAP_ARGS=(--cap-drop ALL)
+  RUN_UID=1000 RUN_GID=1000
+else
+  # Profile B: root only long enough to renumber, then gosu down. The added caps
+  # are cleared by the identity change, so the agent never holds them.
+  USER_ARGS=(--user 0:0)
+  CAP_ARGS=(--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID
+            --cap-add FOWNER --cap-add DAC_OVERRIDE)
+  ENV_ARGS+=(-e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)")
+  RUN_UID=$(id -u) RUN_GID=$(id -g)
+fi
+
+# --------------------------------------------------------------- network ----
+DNS_ARGS=()
+if [ "$OFFLINE" = 1 ]; then
+  NETWORK=none
+  ENV_ARGS+=(-e SANDBOX_EXPECT_PROXY=0)
+  MOUNTS+=(-v "$ROOT/base/profiles/untrusted.json:/etc/claude-code/managed-settings.d/90-untrusted.json:ro")
+  warn "offline: no network, and bypass mode is disabled by the untrusted profile"
+else
+  NETWORK=$NET_ISOLATED
+  proxy_is_healthy || { info "starting egress proxy"; "${COMPOSE[@]}" up -d --build --wait; }
+  # Point the resolver at the proxy's address, where nothing listens on 53.
+  # An internal network does NOT remove DNS: Docker's embedded resolver forwards
+  # queries through the daemon, which resolves them host-side, outside the
+  # container's isolation. That is a working exfiltration channel. With a CONNECT
+  # proxy the agent never needs to resolve anything itself, so sink it. Using an
+  # in-subnet address gives an immediate refusal rather than a 5s timeout.
+  DNS_ARGS=(--dns "$PROXY_IP")
+  ENV_ARGS+=(
+    -e "HTTPS_PROXY=http://${PROXY_IP}:${PROXY_PORT}"
+    -e "HTTP_PROXY=http://${PROXY_IP}:${PROXY_PORT}"
+    -e "https_proxy=http://${PROXY_IP}:${PROXY_PORT}"
+    -e "http_proxy=http://${PROXY_IP}:${PROXY_PORT}"
+    -e "NO_PROXY=localhost,127.0.0.1,::1"
+    -e "no_proxy=localhost,127.0.0.1,::1"
+    -e "npm_config_proxy=http://${PROXY_IP}:${PROXY_PORT}"
+    -e "npm_config_https_proxy=http://${PROXY_IP}:${PROXY_PORT}"
+  )
+fi
+
+# ------------------------------------------------------------------ yolo ----
+if [ "$YOLO" = 1 ]; then
+  [ "$OFFLINE" = 1 ] && die "--yolo and --offline conflict: the untrusted profile disables bypass mode"
+  internal=$(docker network inspect "$NETWORK" -f '{{.Internal}}' 2>/dev/null || echo false)
+  [ "$internal" = true ] || die "--yolo refused: network '$NETWORK' is not internal, so egress is unrestricted"
+  warn "bypass mode. Still in force: no route out, no host credentials, no capabilities,"
+  warn "  and the PreToolUse guard. NOT in force: the permission deny rules."
+fi
+
+# ------------------------------------------------------------- ssh agent ----
+if [ "$WITH_SSH" = 1 ]; then
+  if [ "$(uname -s)" = Darwin ]; then
+    sock=/run/host-services/ssh-auth.sock       # Docker Desktop's bridged path
+  else
+    sock=${SSH_AUTH_SOCK:-}; [ -n "$sock" ] || die "--with-ssh-agent: SSH_AUTH_SOCK is unset"
+  fi
+  MOUNTS+=(-v "$sock:/ssh-agent")
+  ENV_ARGS+=(-e SSH_AUTH_SOCK=/ssh-agent)
+  warn "ssh agent forwarded: anything in the container can sign as you until it exits."
+  warn "  Note git-over-ssh still will not work: a CONNECT proxy speaks HTTP, and"
+  warn "  port 22 is not allowlisted. Use an https remote with --env-file instead."
+fi
+
+# --------------------------------------------------------------- volumes ----
+MOUNTS+=(
+  -v "$AUTH_VOLUME:/home/claude/.claude"                  # shared: credential, account state
+  -v "claude-sandbox-proj-$PROJECT:/home/claude/.claude/projects"  # per-project: transcripts
+  -v "claude-sandbox-cache-$PROJECT:/home/claude/.cache"  # per-project: npm, pip, cargo
+  -v "$PROJECT_DIR:$WORKSPACE"
+)
+for f in ${ENV_FILES[@]+"${ENV_FILES[@]}"}; do MOUNTS+=(--env-file "$f"); done
+
+# ------------------------------------------------------------------- run ----
+if [ "$SHELL_MODE" = 1 ]; then
+  # Pass arguments through so `--shell -- -c '...'` is scriptable, not just
+  # interactive. With no arguments this is a plain login shell.
+  CMD=(bash -l ${PASSTHRU[@]+"${PASSTHRU[@]}"})
+else
+  CMD=(claude)
+  [ "$YOLO" = 1 ] && CMD+=(--dangerously-skip-permissions)
+  CMD+=(${PASSTHRU[@]+"${PASSTHRU[@]}"})
+fi
+[ "$LOGIN" = 1 ] && info "once the agent starts, run /login and paste the code back"
+
+TTY=(-i); [ -t 0 ] && [ -t 1 ] && TTY=(-it)
+
+exec docker run --rm "${TTY[@]}" \
+  --name "claude-sandbox-${PROJECT}-$$" \
+  --hostname "$PROJECT" \
+  --network "$NETWORK" \
+  ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
+  "${CAP_ARGS[@]}" "${USER_ARGS[@]}" \
+  --security-opt no-new-privileges:true \
+  --pids-limit "${SANDBOX_PIDS:-1024}" \
+  --memory "${SANDBOX_MEMORY:-8g}" \
+  --cpus "${SANDBOX_CPUS:-4}" \
+  --tmpfs /tmp:rw,nosuid,nodev,size="${SANDBOX_TMPFS:-2g}" \
+  --tmpfs "/home/claude/.claude/ide:rw,nosuid,nodev,size=1m,mode=0700,uid=${RUN_UID},gid=${RUN_GID}" \
+  -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
+  -e "TERM=${TERM:-xterm-256color}" \
+  -e "GIT_AUTHOR_NAME=$(git config --get user.name || echo '')" \
+  -e "GIT_AUTHOR_EMAIL=$(git config --get user.email || echo '')" \
+  -e "GIT_COMMITTER_NAME=$(git config --get user.name || echo '')" \
+  -e "GIT_COMMITTER_EMAIL=$(git config --get user.email || echo '')" \
+  "${ENV_ARGS[@]}" "${MOUNTS[@]}" \
+  -w "$WORKDIR" \
+  "$IMAGE" "${CMD[@]}"

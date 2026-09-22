@@ -1,0 +1,62 @@
+{
+  "_comment": [
+    "Managed settings: the highest precedence tier. Lives outside the auth volume",
+    "and outside the workspace, so neither a mounted repo nor the agent can reach it.",
+    "",
+    "DELIBERATELY NOT SET, do not copy these in from Anthropic's worked example:",
+    "  permissions.disableBypassPermissionsMode - would break the --yolo flag,",
+    "    which is the whole point of having built the sandbox.",
+    "  allowManagedPermissionRulesOnly - would make a repo's own .claude/settings.json",
+    "    stop having any effect, defeating per-project configuration.",
+    "Both ship in profiles/untrusted.json instead, applied by --offline.",
+    "",
+    "NOTE: deny rules do NOT apply under --dangerously-skip-permissions. Anything",
+    "that must hold in both modes lives in the PreToolUse hook below, which fires",
+    "from the tool execution path independently of the permission engine."
+  ],
+  "permissions": {
+    "deny": [
+      "Write(.git/hooks/**)",
+      "Edit(.git/hooks/**)",
+      "Write(.github/workflows/**)",
+      "Edit(.github/workflows/**)",
+      "Write(.devcontainer/**)",
+      "Edit(.devcontainer/**)",
+      "Write(.mcp.json)",
+      "Write(.claude/settings.json)",
+      "Write(.claude/settings.local.json)",
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa*)",
+      "Read(**/id_ed25519*)",
+      "Read(**/.npmrc)",
+      "Read(**/.netrc)",
+      "Read(**/.git-credentials)",
+      "Bash(sudo:*)",
+      "Bash(su:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(git remote add:*)",
+      "Bash(npm publish:*)"
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Edit|Write|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/sandbox-secret-guard", "timeout": 5 }
+        ]
+      }
+    ]
+  },
+  "allowManagedMcpServersOnly": true,
+  "enableAllProjectMcpServers": false,
+  "includeCoAuthoredBy": false
+}

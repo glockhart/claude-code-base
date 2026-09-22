@@ -1,0 +1,65 @@
+# Shared egress proxy and the two networks. Brought up once, used by every
+# project run. `name:` fixes the network names so bin/claude-sandbox and
+# templates/devcontainer.json can refer to them literally.
+name: claude-egress
+
+services:
+  proxy:
+    build:
+      context: ../proxy
+    image: claude-sandbox-proxy:1
+    container_name: claude-egress-proxy
+    init: true
+    restart: unless-stopped
+    # Run AS the squid user rather than starting as root and letting squid drop.
+    # If it drops, /dev/stdout is still owned by root and squid dies on startup
+    # unable to open its own log, which also costs us the audit trail.
+    user: proxy
+    networks:
+      isolated:
+        # Pinned so the agent can address the proxy by IP and never needs to
+        # resolve a name. See the dns: note on the agent side.
+        ipv4_address: 10.99.0.2
+      external: {}
+    volumes:
+      - ../proxy/squid.conf:/etc/squid/squid.conf:ro
+      - ../proxy/allowlist.conf:/etc/squid/allowlist.conf:ro
+      - ../proxy/allowlist.optional.conf:/etc/squid/allowlist.optional.conf:ro
+      - ../proxy/allowlist.vscode.conf:/etc/squid/allowlist.vscode.conf:ro
+      - ../proxy/allowlist.local.conf:/etc/squid/allowlist.local.conf:ro
+    # The proxy is the one component here that can be fully locked down: it
+    # installs nothing, writes nothing durable, and needs no privileges.
+    cap_drop: [ALL]   # nothing to add: no privilege drop is needed
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/run/squid:rw,nosuid,nodev,size=8m
+      - /var/log/squid:rw,nosuid,nodev,size=64m
+      - /var/spool/squid:rw,nosuid,nodev,size=16m
+    mem_limit: 256m
+    pids_limit: 64
+    healthcheck:
+      # Without this the agent can start before squid is listening, the first
+      # API call fails, and the natural next move is to disable the sandbox.
+      test: ["CMD", "/usr/local/bin/squid-health"]
+      interval: 15s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+networks:
+  # The agent attaches ONLY here. internal: true means Docker installs no NAT
+  # and no default route, so there is no path out that does not go through the
+  # proxy. Enforcement sits outside the blast radius: the agent has no
+  # capability to change any of this from inside.
+  isolated:
+    name: claude-egress_isolated
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.99.0.0/24
+          gateway: 10.99.0.1
+  external:
+    name: claude-egress_external
+    driver: bridge

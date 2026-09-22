@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015  # `cond && pass || fail` is deliberate; both return 0
+# shellcheck source=/dev/null
+# Checks that need only the built image. No proxy, no network.
+set -uo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+. "$ROOT/test/lib.sh"; set -a; . "$ROOT/versions.env"; set +a
+need_docker
+IMG=$BASE_IMAGE_NAME:$CLAUDE_CODE_VERSION
+run() { docker run --rm --entrypoint bash "$IMG" -c "$1" 2>/dev/null; }
+
+head_ "1. No secrets in the image"
+env_dump=$(docker run --rm --entrypoint /usr/bin/env "$IMG" 2>/dev/null)
+grep -qEi '(api|secret|token|password)_?key?=' <<<"$env_dump" \
+  && fail "credential-shaped variable in image env" || pass "image env is clean"
+docker history --no-trunc --format '{{.CreatedBy}}' "$IMG" 2>/dev/null \
+  | grep -qEi 'sk-ant-|ghp_|ANTHROPIC_API_KEY|GITHUB_TOKEN' \
+  && fail "credential material in build history" || pass "build history is clean"
+run 'test -e /home/claude/.claude/.credentials.json -o -e /home/claude/.claude.json' \
+  && fail "credential or account state baked into the image" \
+  || pass "no baked credentials in the config dir"
+[ -z "$(run 'find /home/claude/.claude -type f 2>/dev/null')" ] \
+  && pass "config dir holds no files in the image" || fail "config dir has files: $(run 'find /home/claude/.claude -type f')"
+
+head_ "2. Identity and privilege"
+[ "$(run 'id -u')" = 1000 ] && pass "default user is uid 1000, not root" || fail "default user is $(run 'id -u')"
+[ -z "$(run 'find / -xdev -perm -4000 -type f 2>/dev/null')" ] \
+  && pass "no setuid binaries" || fail "setuid binaries present: $(run 'find / -xdev -perm -4000 -type f 2>/dev/null' | tr '\n' ' ')"
+run 'command -v sudo' >/dev/null && fail "sudo is installed" || pass "no sudo"
+run 'command -v iptables' >/dev/null && fail "iptables is installed" || pass "no iptables"
+
+head_ "3. Baked configuration"
+run 'test -f /etc/claude-code/managed-settings.json' && pass "managed settings present" || fail "managed settings missing"
+[ "$(run 'stat -c %a /etc/claude-code/managed-settings.json')" = 444 ] \
+  && pass "managed settings are read-only" || fail "managed settings are writable"
+run 'jq -e .hooks.PreToolUse /etc/claude-code/managed-settings.json' >/dev/null \
+  && pass "PreToolUse guard is wired up" || fail "PreToolUse guard missing"
+# These two keys must stay unset, or --yolo breaks and project settings stop applying.
+run 'jq -e ".permissions.disableBypassPermissionsMode // empty" /etc/claude-code/managed-settings.json' >/dev/null \
+  && fail "disableBypassPermissionsMode is set; --yolo will not work" \
+  || pass "bypass mode not disabled in the base policy"
+run 'jq -e ".allowManagedPermissionRulesOnly // empty" /etc/claude-code/managed-settings.json' >/dev/null \
+  && fail "allowManagedPermissionRulesOnly is set; project settings will be ignored" \
+  || pass "project permission rules still apply"
+[ "$(run 'stat -c %a /usr/local/bin/sandbox-secret-guard')" = 555 ] \
+  && pass "secret guard is not agent-writable" || fail "secret guard is writable"
+
+head_ "4. The agent runs"
+v=$(docker run --rm --entrypoint claude "$IMG" --version 2>/dev/null | head -1)
+grep -q "$CLAUDE_CODE_VERSION" <<<"$v" && pass "agent reports $v" || fail "version mismatch: got '$v', want $CLAUDE_CODE_VERSION"
+
+head_ "5. Secret guard blocks what it should"
+guard() { docker run --rm -i --entrypoint /usr/local/bin/sandbox-secret-guard "$IMG" <<<"$1" >/dev/null 2>&1; echo $?; }
+[ "$(guard '{"tool_name":"Write","tool_input":{"file_path":"/workspace/p/.git/hooks/pre-commit"}}')" = 2 ] \
+  && pass "blocks writes to git hooks (the deferred-escape path)" || fail "git hook write was allowed"
+[ "$(guard '{"tool_name":"Bash","tool_input":{"command":"cat /home/claude/.ssh/id_rsa"}}')" = 2 ] \
+  && pass "blocks reads of ssh keys" || fail "ssh key read was allowed"
+[ "$(guard '{"tool_name":"Edit","tool_input":{"file_path":"/workspace/p/src/main.rs"}}')" = 0 ] \
+  && pass "allows ordinary source edits" || fail "ordinary edit was blocked"
+head_ "6. Launcher argument handling"
+# Regression: --shell used to discard passthrough args, so it could not be
+# scripted and every non-interactive use silently did nothing.
+out=$(cd /tmp && "$ROOT/bin/claude-sandbox" --offline --shell -- -c 'echo SHELL_PASSTHRU_OK' 2>/dev/null | tr -d '\r')
+grep -q SHELL_PASSTHRU_OK <<<"$out" && pass "--shell passes arguments through" || fail "--shell dropped its arguments"
+summary

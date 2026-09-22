@@ -1,0 +1,7 @@
+{
+  "_comment": "Mounted at /etc/claude-code/managed-settings.d/90-untrusted.json by --offline. Merged after the base policy.",
+  "permissions": {
+    "disableBypassPermissionsMode": "disable"
+  },
+  "allowManagedPermissionRulesOnly": true
+}

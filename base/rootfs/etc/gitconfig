@@ -1,0 +1,17 @@
+# System gitconfig for the sandbox. The host ~/.gitconfig is deliberately NOT
+# mounted: it is a live code-execution surface (core.pager, credential helpers,
+# shell aliases) pointing at binaries that do not exist here. Identity arrives
+# as environment variables from the launcher instead.
+#
+# No http.proxy here on purpose. git honours http_proxy/https_proxy from the
+# environment, which the launcher sets at RUN time. Baking a proxy address into
+# the image would break `docker build` of per-project images, which run on the
+# normal bridge where 10.99.0.2 does not exist.
+[safe]
+	directory = *
+[commit]
+	gpgsign = false
+[advice]
+	detachedHead = false
+[init]
+	defaultBranch = main

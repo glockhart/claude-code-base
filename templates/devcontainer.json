@@ -1,0 +1,41 @@
+{
+  // Copy to <your-repo>/.devcontainer/devcontainer.json.
+  //
+  // Reuses the same image, auth volume and hardening as bin/claude-sandbox so
+  // the two entry points cannot drift apart.
+  //
+  // Cross-host (editor on the Mac, Docker on Debian): use Remote SSH to the
+  // Debian box FIRST, then "Dev Containers: Reopen in Container" there. Docker
+  // cannot bind-mount your Mac's filesystem into a container on another host,
+  // so the repo has to live where the daemon is. See docs/vscode.md.
+  "name": "claude-sandbox",
+  "image": "claude-code-base:2.1.278",
+  "remoteUser": "claude",
+  "workspaceFolder": "/workspace",
+  "runArgs": [
+    "--network=claude-egress_isolated",
+    "--dns=10.99.0.2",
+    "--cap-drop=ALL",
+    "--security-opt", "no-new-privileges:true",
+    "--pids-limit", "1024",
+    "--memory", "8g",
+    // Per-container lockfile directory. The extension writes a port and auth
+    // token here; without this tmpfs, two containers sharing the auth volume
+    // would see each other's lockfiles and connect to the wrong loopback port.
+    "--tmpfs", "/home/claude/.claude/ide:rw,nosuid,nodev,size=1m,mode=0700,uid=1000,gid=1000"
+  ],
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/home/claude/.claude",
+    "HTTPS_PROXY": "http://10.99.0.2:3128",
+    "HTTP_PROXY": "http://10.99.0.2:3128",
+    "NO_PROXY": "localhost,127.0.0.1,::1"
+  },
+  "mounts": [
+    "source=claude-sandbox-auth,target=/home/claude/.claude,type=volume"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": ["anthropic.claude-code"]
+    }
+  }
+}
