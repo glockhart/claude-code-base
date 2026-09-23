@@ -1,0 +1,178 @@
+# Publish both images to GitHub Container Registry.
+#
+# Fires on push to main, which is what a merged pull request produces whether
+# merged, squashed or rebased. Branch pushes never reach here.
+#
+# Packages are PRIVATE by default and stay that way: visibility is independent
+# of the repository and defaults to private on first publish. Making a package
+# public is irreversible, so nothing here touches visibility.
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write         # required for GITHUB_TOKEN to push to ghcr.io
+
+concurrency:
+  group: publish-main
+  cancel-in-progress: false   # never cancel a publish mid-flight
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # Read the tags out of versions.env once, so nothing downstream has to parse
+  # it again or hardcode a version. The two images version independently.
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      base_version: ${{ steps.v.outputs.base_version }}
+      proxy_version: ${{ steps.v.outputs.proxy_version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          set -a; . ./versions.env; set +a
+          {
+            echo "base_version=$CLAUDE_CODE_VERSION"
+            echo "proxy_version=$PROXY_IMAGE_TAG"
+            echo "sha=sha-$(git rev-parse --short HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+  # Gate the publish on the suites. Builds for the runner's own architecture
+  # only; the multi-arch build follows and reuses the layer cache.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - run: make build
+      - run: make smoke
+      - run: ./bin/claude-sandbox proxy up
+      - run: make verify
+      - name: Proxy log
+        if: always()
+        run: docker logs claude-egress-proxy 2>&1 | tail -50
+
+  # One job per image per platform, each on a native runner, each pushing by
+  # digest. Native matters: the base build runs npm install, a version
+  # assertion and a full-filesystem find, all target-architecture binaries that
+  # crawl under emulation.
+  build:
+    needs: [meta, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [base, proxy]
+        platform:
+          - { id: linux/amd64, runner: ubuntu-24.04,     arch: amd64 }
+          - { id: linux/arm64, runner: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image name
+        id: n
+        run: |
+          set -a; . ./versions.env; set +a
+          case "${{ matrix.image }}" in
+            base)  echo "name=$BASE_IMAGE_NAME"  >> "$GITHUB_OUTPUT" ;;
+            proxy) echo "name=$PROXY_IMAGE_NAME" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+
+      # context is the subdirectory, matching the Makefile. The repo root is
+      # deliberately NOT the context: a root .dockerignore would then apply and
+      # is exactly how the proxy build breaks silently.
+      - uses: docker/build-push-action@v7
+        id: push
+        with:
+          context: ${{ matrix.image }}
+          platforms: ${{ matrix.platform.id }}
+          build-args: ${{ matrix.image == 'base' && format('CLAUDE_CODE_VERSION={0}', needs.meta.outputs.base_version) || '' }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ steps.n.outputs.name }},push-by-digest=true,name-canonical=true,push=true
+          # Scoped per image and platform. Four jobs share one 10GB LRU cache;
+          # an unscoped key means they evict each other and nothing ever hits.
+          cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.image }}-${{ matrix.platform.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  # Stitch the per-platform digests into one manifest list per image and apply
+  # the tags. Until this runs the pushed digests are untagged and invisible.
+  merge:
+    needs: [meta, build]
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        image: [base, proxy]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-${{ matrix.image }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Create the manifest list
+        run: |
+          set -a; . ./versions.env; set +a
+          case "${{ matrix.image }}" in
+            base)  name=$BASE_IMAGE_NAME;  version=${{ needs.meta.outputs.base_version }} ;;
+            proxy) name=$PROXY_IMAGE_NAME; version=${{ needs.meta.outputs.proxy_version }} ;;
+          esac
+          repo="${{ env.REGISTRY }}/${{ github.repository_owner }}/$name"
+          # Word splitting is the point: each digest must be its own argument.
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            -t "$repo:$version" \
+            -t "$repo:${{ needs.meta.outputs.sha }}" \
+            -t "$repo:latest" \
+            $(cd /tmp/digests && printf "${repo}@sha256:%s " *)
+          docker buildx imagetools inspect "$repo:$version"
+
+  # Untagged versions pile up on every push and bill as storage on a private
+  # repo. Non-fatal: user-owned packages are a known rough edge for
+  # GITHUB_TOKEN, and a permissions wrinkle must not fail a good publish.
+  prune:
+    needs: merge
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    strategy:
+      matrix:
+        package: [claude-code-base, claude-sandbox-proxy]
+    steps:
+      - uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ matrix.package }}
+          package-type: container
+          delete-only-untagged-versions: "true"
+          min-versions-to-keep: 5
+          token: ${{ secrets.GITHUB_TOKEN }}

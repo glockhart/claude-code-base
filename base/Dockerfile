@@ -15,6 +15,13 @@ FROM ${NODE_IMAGE}
 ARG CLAUDE_CODE_VERSION
 ARG DEBIAN_FRONTEND=noninteractive
 
+# Links the published package to the repository, so it inherits the repo's
+# access permissions and shows its source. Without it the package is orphaned
+# and access has to be managed by hand.
+LABEL org.opencontainers.image.source="https://github.com/glockhart/claude-code-base"
+LABEL org.opencontainers.image.description="Hardened, network-restricted sandbox for running Claude Code"
+LABEL org.opencontainers.image.licenses="MIT"
+
 # --- tooling -----------------------------------------------------------------
 # Only what the sandbox itself needs, or what is useful in ANY repository.
 # Language toolchains belong in per-project images layered on top of this one.

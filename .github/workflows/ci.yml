@@ -1,0 +1,61 @@
+# Pull request checks. Builds both images and runs the suites. Publishes nothing.
+#
+# Worth knowing: runners are not uid 1000, so this is the only place identity
+# Profile B actually executes (start as root, remap, drop with gosu). On the
+# development Mac every run takes Profile A, so CI is the real test of the
+# Linux path.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read          # nothing else; this workflow must never publish
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install linters
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          curl -fsSL -o /tmp/hadolint \
+            https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          sudo install -m0755 /tmp/hadolint /usr/local/bin/hadolint
+      # CI=true makes a missing linter a failure rather than a silent skip.
+      - run: make lint
+        env:
+          CI: "true"
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build for this runner's own architecture and load it, because the
+      # suites need a real local image to inspect and run.
+      - uses: docker/setup-buildx-action@v4
+      - name: Build both images
+        run: make build
+
+      - name: Smoke suite
+        run: make smoke
+
+      - name: Start the egress proxy
+        run: ./bin/claude-sandbox proxy up
+
+      - name: Security assertions
+        run: make verify
+
+      # The audit trail is the compensating control for allowlisted hosts, so
+      # surface it when something fails rather than making it a guess.
+      - name: Proxy log
+        if: always()
+        run: docker logs claude-egress-proxy 2>&1 | tail -50

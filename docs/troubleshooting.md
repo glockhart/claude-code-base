@@ -52,10 +52,16 @@ because there is no request to evaluate. A line every few seconds from
 `127.0.0.1` would be different: that would be the healthcheck misconfigured, and
 `make verify` fails on it.
 
-**`image ... not found and REGISTRY is unset`**
-The machine has the script but not the images. Either set `REGISTRY` in
-`~/.config/claude-sandbox/config` and run `claude-sandbox pull`, or move the
-images across by hand:
+**`could not pull ghcr.io/...`**
+The images are private, so this is almost always a missing registry sign-in.
+Use a **classic** personal access token with `read:packages`; fine-grained
+tokens do not work with ghcr.io.
+
+```bash
+echo "$CR_PAT" | docker login ghcr.io -u glockhart --password-stdin
+```
+
+If you would rather not depend on the registry, move the images across by hand:
 
 ```bash
 # where the images exist
@@ -65,7 +71,8 @@ gunzip -c imgs.tgz | docker load
 ```
 
 **The script behaves differently on two machines**
-Check what each one resolved. Configuration precedence is environment
-variables, then `~/.config/claude-sandbox/config`, then `versions.env` if the
-script sits in a checkout, then built-in defaults. A stale
-`~/.config/claude-sandbox/config` on one host is the usual cause.
+Run `claude-sandbox config` on each and compare. It prints every resolved value
+and which files it read. Configuration precedence is environment variables,
+then `~/.config/claude-sandbox/config`, then `versions.env` if the script sits
+in a checkout, then built-in defaults. A stale config file on one host is the
+usual cause.

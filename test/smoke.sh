@@ -127,5 +127,10 @@ grep -q 'base image' <<<"$out" && pass "doctor is built in, not a separate scrip
 grep -q "$CLAUDE_CODE_VERSION" <<<"$out" \
   && pass "built-in default version matches versions.env ($CLAUDE_CODE_VERSION)" \
   || fail "built-in default version has drifted from versions.env"
+# REGISTRY must match too, or a standalone copy pulls from the wrong namespace.
+sa_reg=$(CLAUDE_SANDBOX_ROOT="$sa" "$sa/claude-sandbox" config 2>/dev/null | sed -n 's/^REGISTRY=//p')
+[ "$sa_reg" = "$REGISTRY" ] \
+  && pass "built-in default REGISTRY matches versions.env (${REGISTRY:-empty})" \
+  || fail "built-in REGISTRY '$sa_reg' has drifted from versions.env '$REGISTRY'"
 rm -rf "$sa"
 summary

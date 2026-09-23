@@ -7,6 +7,7 @@
 #   claude-sandbox [flags] [-- claude args...]
 #   claude-sandbox proxy up|down|logs|reload
 #   claude-sandbox plugins export [FILE] | plugins import FILE | plugins list
+#   claude-sandbox pull | config
 #   claude-sandbox login | logout | doctor
 #
 # Flags:
@@ -61,7 +62,7 @@ load_config "$ROOT/versions.env"
 : "${BASE_IMAGE_NAME:=claude-code-base}"
 : "${PROXY_IMAGE_NAME:=claude-sandbox-proxy}"
 : "${PROXY_IMAGE_TAG:=1}"
-: "${REGISTRY:=}"
+: "${REGISTRY:=ghcr.io/glockhart}"
 : "${NET_ISOLATED:=claude-egress_isolated}"
 : "${NET_EXTERNAL:=claude-egress_external}"
 : "${PROXY_NAME:=claude-egress-proxy}"
@@ -90,7 +91,11 @@ ensure_image() {
   docker image inspect "$img" >/dev/null 2>&1 && return 0
   if [ -n "$REGISTRY" ]; then
     info "pulling $REGISTRY/$img"
-    docker pull "$REGISTRY/$img" >/dev/null || die "could not pull $REGISTRY/$img"
+    docker pull "$REGISTRY/$img" >/dev/null || die "could not pull $REGISTRY/$img
+  These images are private. Sign in once per machine with a CLASSIC personal
+  access token carrying the read:packages scope (fine-grained tokens do not
+  work with ghcr.io):
+      echo \"\$CR_PAT\" | docker login ghcr.io -u glockhart --password-stdin"
     docker tag "$REGISTRY/$img" "$img"
     return 0
   fi
@@ -253,6 +258,18 @@ case ${1-} in
       reload) exec docker exec "$PROXY_NAME" squid -k reconfigure ;;
       *)      die "proxy: expected up, down, logs or reload" ;;
     esac ;;
+  config) shift
+    # Print what this machine actually resolved. Configuration comes from four
+    # places, so "it behaves differently over here" is nearly always answered
+    # by diffing this output between two hosts.
+    for v in CLAUDE_CODE_VERSION BASE_IMAGE_NAME PROXY_IMAGE_NAME PROXY_IMAGE_TAG \
+             REGISTRY NET_ISOLATED NET_EXTERNAL PROXY_NAME PROXY_IP PROXY_PORT \
+             PROXY_SUBNET AUTH_VOLUME; do
+      printf '%s=%s\n' "$v" "${!v}"
+    done
+    printf 'CONFIG_FILE=%s\n' "$([ -f "$HOME/.config/claude-sandbox/config" ] && echo "$HOME/.config/claude-sandbox/config" || echo "(none)")"
+    printf 'VERSIONS_ENV=%s\n' "$([ -f "$ROOT/versions.env" ] && echo "$ROOT/versions.env" || echo "(none, using built-in defaults)")"
+    exit 0 ;;
   pull)   ensure_image "$IMAGE_TOOLS"; ensure_image "$PROXY_IMAGE"; info "images ready"; exit 0 ;;
   plugins) shift
     sub=${1-}; [ $# -gt 0 ] && shift

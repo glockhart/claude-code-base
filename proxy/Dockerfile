@@ -2,6 +2,10 @@
 # enforcement point for the whole sandbox, and it is reachable from the agent.
 FROM debian:bookworm-slim
 
+LABEL org.opencontainers.image.source="https://github.com/glockhart/claude-code-base"
+LABEL org.opencontainers.image.description="Default-deny egress proxy for the Claude Code sandbox"
+LABEL org.opencontainers.image.licenses="MIT"
+
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends squid ca-certificates; \

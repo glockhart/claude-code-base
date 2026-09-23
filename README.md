@@ -30,18 +30,22 @@ file. Copy the one file and go:
 ```bash
 scp bin/claude-sandbox other-host:~/.local/bin/
 ssh other-host
-claude-sandbox pull   # if REGISTRY is set; otherwise docker load the images
-claude-sandbox login
+docker login ghcr.io -u glockhart   # classic PAT with read:packages
+claude-sandbox pull                 # fetches both images
+claude-sandbox login                # one-time Anthropic sign-in
 cd ~/some-project && claude-sandbox
 ```
 
-Point it at a registry once per machine, if you publish images with
-`make release`:
+The images are published privately to GitHub Container Registry by Actions on
+merge to main, and `REGISTRY` already points there. Sign in once per machine
+with a **classic** personal access token carrying `read:packages`, since
+fine-grained tokens do not work with ghcr.io:
 
 ```bash
-mkdir -p ~/.config/claude-sandbox
-echo 'REGISTRY=ghcr.io/you' >> ~/.config/claude-sandbox/config
+echo "$CR_PAT" | docker login ghcr.io -u glockhart --password-stdin
 ```
+
+See [docs/publishing.md](docs/publishing.md).
 
 Configuration precedence, highest first: environment variables, then
 `~/.config/claude-sandbox/config`, then `versions.env` if the script happens to
@@ -92,6 +96,7 @@ anything itself, so the resolver points at an address with nothing on port 53.
 | `claude-sandbox plugins import F` | Restore that bundle here |
 | `claude-sandbox doctor` | Check this host is set up correctly |
 | `claude-sandbox pull` | Fetch both images from the configured registry |
+| `claude-sandbox config` | Print what this machine actually resolved |
 
 ## What is not in the container
 

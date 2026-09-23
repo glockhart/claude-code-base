@@ -6,7 +6,7 @@ export
 
 IMAGE := $(BASE_IMAGE_NAME):$(CLAUDE_CODE_VERSION)
 
-.PHONY: help build build-proxy doctor release proxy-up proxy-down proxy-logs login logout install lint test verify smoke bump-claude prune-projects
+.PHONY: help build build-proxy doctor proxy-up proxy-down proxy-logs login logout install lint test verify smoke bump-claude prune-projects
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -17,14 +17,6 @@ build: build-proxy ## Build both images for this machine's native arch
 	  --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
 	  --build-arg NODE_IMAGE=$(NODE_IMAGE) \
 	  -t $(IMAGE) -t $(BASE_IMAGE_NAME):latest base
-
-release: ## Build linux/amd64 + linux/arm64 and push to $(REGISTRY)
-	@test -n "$(REGISTRY)" || { echo "REGISTRY is empty in versions.env; refusing to push"; exit 1; }
-	docker buildx build --platform linux/amd64,linux/arm64 \
-	  --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
-	  --build-arg NODE_IMAGE=$(NODE_IMAGE) \
-	  --attest type=sbom --attest type=provenance,mode=max \
-	  -t $(REGISTRY)/$(IMAGE) --push base
 
 build-proxy: ## Build the egress proxy image
 	docker build -t $(PROXY_IMAGE_NAME):$(PROXY_IMAGE_TAG) proxy
@@ -50,10 +42,19 @@ install: ## Symlink bin/claude-sandbox into ~/.local/bin
 	@echo "linked $$HOME/.local/bin/claude-sandbox -> $(CURDIR)/bin/claude-sandbox"
 
 lint: ## shellcheck the scripts, hadolint the Dockerfiles
-	@command -v shellcheck >/dev/null && shellcheck bin/claude-sandbox base/entrypoint.sh \
-	  base/rootfs/usr/local/bin/* test/*.sh || echo "shellcheck not installed, skipped"
-	@command -v hadolint >/dev/null && hadolint base/Dockerfile proxy/Dockerfile \
-	  || echo "hadolint not installed, skipped"
+	@fail=0; \
+	if command -v shellcheck >/dev/null; then \
+	  shellcheck --severity=warning bin/claude-sandbox base/entrypoint.sh \
+	    base/rootfs/usr/local/bin/* test/*.sh || fail=1; \
+	else \
+	  echo "shellcheck not installed"; [ -z "$${CI:-}" ] || fail=1; \
+	fi; \
+	if command -v hadolint >/dev/null; then \
+	  hadolint base/Dockerfile proxy/Dockerfile || fail=1; \
+	else \
+	  echo "hadolint not installed"; [ -z "$${CI:-}" ] || fail=1; \
+	fi; \
+	exit $$fail
 
 doctor: ## Check this host is set up correctly
 	./bin/claude-sandbox doctor
