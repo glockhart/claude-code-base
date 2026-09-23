@@ -56,6 +56,10 @@ RUN set -eux; \
 
 # --- baked configuration -----------------------------------------------------
 COPY rootfs/ /
+# --offline applies this. Baked in rather than bind-mounted from the repo so a
+# standalone launcher can still use it; the entrypoint copies it into the
+# drop-in directory when SANDBOX_OFFLINE=1.
+COPY profiles/untrusted.json /etc/claude-code/profiles/untrusted.json
 RUN set -eux; \
     chmod 0444 /etc/claude-code/managed-settings.json; \
     chmod 0555 /usr/local/bin/sandbox-secret-guard /usr/local/bin/sandbox-preflight

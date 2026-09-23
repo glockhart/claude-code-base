@@ -112,4 +112,20 @@ else
   skip "no plugins in the auth volume to export"
 fi
 rm -rf "$tmp"
+head_ "8. The launcher is standalone"
+# It gets copied to machines that have no checkout, so it must not need one.
+sa=$(mktemp -d); cp "$ROOT/bin/claude-sandbox" "$sa/"
+[ ! -f "$sa/versions.env" ] && pass "test fixture has no versions.env" || fail "fixture is not clean"
+if CLAUDE_SANDBOX_ROOT="$sa" "$sa/claude-sandbox" --help >/dev/null 2>&1; then
+  pass "runs with no repo files beside it"
+else
+  fail "launcher requires repo files it should carry as defaults"
+fi
+out=$(CLAUDE_SANDBOX_ROOT="$sa" "$sa/claude-sandbox" doctor 2>&1 || true)
+grep -q 'base image' <<<"$out" && pass "doctor is built in, not a separate script" \
+  || fail "doctor did not run standalone"
+grep -q "$CLAUDE_CODE_VERSION" <<<"$out" \
+  && pass "built-in default version matches versions.env ($CLAUDE_CODE_VERSION)" \
+  || fail "built-in default version has drifted from versions.env"
+rm -rf "$sa"
 summary

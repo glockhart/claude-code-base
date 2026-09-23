@@ -4,7 +4,7 @@ Three suites. Run all three after any change to the image, the proxy or the
 launcher.
 
 ```bash
-claude-sandbox doctor   # host setup: docker, networks, volumes, firewall
+claude-sandbox doctor   # host setup: docker, images, networks, volumes, firewall
 make smoke              # image-only: secrets, privilege, baked config, the guard
 make verify             # security assertions: egress, DNS, capabilities
 ```

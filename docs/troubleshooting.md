@@ -51,3 +51,21 @@ request. Squid logs aborted transactions regardless of the access-log ACL,
 because there is no request to evaluate. A line every few seconds from
 `127.0.0.1` would be different: that would be the healthcheck misconfigured, and
 `make verify` fails on it.
+
+**`image ... not found and REGISTRY is unset`**
+The machine has the script but not the images. Either set `REGISTRY` in
+`~/.config/claude-sandbox/config` and run `claude-sandbox pull`, or move the
+images across by hand:
+
+```bash
+# where the images exist
+docker save claude-code-base:2.1.278 claude-sandbox-proxy:1 | gzip > imgs.tgz
+# on the target machine
+gunzip -c imgs.tgz | docker load
+```
+
+**The script behaves differently on two machines**
+Check what each one resolved. Configuration precedence is environment
+variables, then `~/.config/claude-sandbox/config`, then `versions.env` if the
+script sits in a checkout, then built-in defaults. A stale
+`~/.config/claude-sandbox/config` on one host is the usual cause.

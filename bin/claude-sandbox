@@ -22,6 +22,12 @@
 set -euo pipefail
 
 # ------------------------------------------------------------- bootstrap ----
+# This script is standalone. Copy it to any machine with docker and it works;
+# it does not need the repo. Configuration precedence, highest first:
+#   1. environment variables
+#   2. ~/.config/claude-sandbox/config
+#   3. versions.env, if this script happens to sit in a checkout
+#   4. the built-in defaults below
 resolve_root() {                    # readlink -f is not portable to older macOS
   local src=${BASH_SOURCE[0]} dir
   while [ -L "$src" ]; do
@@ -30,22 +36,135 @@ resolve_root() {                    # readlink -f is not portable to older macOS
   done
   cd -P "$(dirname "$src")/.." && pwd
 }
+
+# Read KEY=value without clobbering anything already set, so the environment
+# keeps priority over files.
+load_config() {
+  local f=$1 k v
+  [ -f "$f" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in ''|'#'*) continue ;; esac
+    k=${line%%=*}; v=${line#*=}
+    case $k in *[!A-Za-z0-9_]*) continue ;; esac
+    v=${v%%#*}; v=${v%"${v##*[![:space:]]}"}
+    v=${v#\"}; v=${v%\"}; v=${v#\'}; v=${v%\'}
+    [ -n "${!k:-}" ] || export "$k=$v"
+  done < "$f"
+}
+
 ROOT=${CLAUDE_SANDBOX_ROOT:-$(resolve_root)}
-[ -f "$ROOT/versions.env" ] || { echo "claude-sandbox: cannot find versions.env (set CLAUDE_SANDBOX_ROOT)" >&2; exit 1; }
-set -a; . "$ROOT/versions.env"
-[ -f "$HOME/.config/claude-sandbox/config" ] && . "$HOME/.config/claude-sandbox/config"
-set +a
+load_config "$HOME/.config/claude-sandbox/config"
+load_config "$ROOT/versions.env"
+
+# Built-in defaults. These are what make the script standalone.
+: "${CLAUDE_CODE_VERSION:=2.1.278}"
+: "${BASE_IMAGE_NAME:=claude-code-base}"
+: "${PROXY_IMAGE_NAME:=claude-sandbox-proxy}"
+: "${PROXY_IMAGE_TAG:=1}"
+: "${REGISTRY:=}"
+: "${NET_ISOLATED:=claude-egress_isolated}"
+: "${NET_EXTERNAL:=claude-egress_external}"
+: "${PROXY_NAME:=claude-egress-proxy}"
+: "${PROXY_IP:=10.99.0.2}"
+: "${PROXY_PORT:=3128}"
+: "${PROXY_SUBNET:=10.99.0.0/24}"
+: "${PROXY_GATEWAY:=10.99.0.1}"
+: "${AUTH_VOLUME:=claude-sandbox-auth}"
 
 die()  { printf '\033[31mclaude-sandbox:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2m[sandbox]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[sandbox]\033[0m %s\n' "$*" >&2; }
 sha()  { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 
-COMPOSE=(docker compose -f "$ROOT/compose/egress.yml")
 IMAGE_TOOLS=${BASE_IMAGE_NAME}:${CLAUDE_CODE_VERSION}
+PROXY_IMAGE=${PROXY_IMAGE_NAME}:${PROXY_IMAGE_TAG}
 
 proxy_is_healthy() {
-  [ "$(docker inspect -f '{{.State.Health.Status}}' claude-egress-proxy 2>/dev/null)" = healthy ]
+  [ "$(docker inspect -f '{{.State.Health.Status}}' "$PROXY_NAME" 2>/dev/null)" = healthy ]
+}
+
+# Pull when the image is absent and a registry is configured. This is what lets
+# a freshly copied script work on a machine that never had the repo.
+ensure_image() {
+  local img=$1
+  docker image inspect "$img" >/dev/null 2>&1 && return 0
+  if [ -n "$REGISTRY" ]; then
+    info "pulling $REGISTRY/$img"
+    docker pull "$REGISTRY/$img" >/dev/null || die "could not pull $REGISTRY/$img"
+    docker tag "$REGISTRY/$img" "$img"
+    return 0
+  fi
+  die "image $img not found and REGISTRY is unset.
+  Either set REGISTRY in ~/.config/claude-sandbox/config and re-run,
+  or load an image exported elsewhere with: docker load -i <file>.tar"
+}
+
+# The proxy is started with plain docker, not compose, so this works from a
+# standalone copy of the script. Its config and healthcheck are baked into the
+# image for the same reason.
+proxy_up() {
+  ensure_image "$PROXY_IMAGE"
+  docker network inspect "$NET_EXTERNAL" >/dev/null 2>&1 \
+    || docker network create "$NET_EXTERNAL" >/dev/null
+  # internal: no NAT and no default route, so nothing on it can reach out
+  # except through the proxy.
+  docker network inspect "$NET_ISOLATED" >/dev/null 2>&1 \
+    || docker network create --internal --subnet "$PROXY_SUBNET" --gateway "$PROXY_GATEWAY" \
+         "$NET_ISOLATED" >/dev/null
+
+  if [ -n "$(docker ps -aq -f "name=^${PROXY_NAME}$")" ]; then
+    docker start "$PROXY_NAME" >/dev/null 2>&1 || true
+  else
+    docker run -d --name "$PROXY_NAME" \
+      --network "$NET_EXTERNAL" \
+      --user proxy --init --restart unless-stopped \
+      --cap-drop ALL --security-opt no-new-privileges:true \
+      --read-only \
+      --tmpfs /var/run/squid:rw,nosuid,nodev,size=8m,uid=13,gid=13 \
+      --tmpfs /var/log/squid:rw,nosuid,nodev,size=64m,uid=13,gid=13 \
+      --tmpfs /var/spool/squid:rw,nosuid,nodev,size=16m,uid=13,gid=13 \
+      --memory 256m --pids-limit 64 \
+      "$PROXY_IMAGE" >/dev/null || die "could not start the proxy"
+    docker network connect --ip "$PROXY_IP" "$NET_ISOLATED" "$PROXY_NAME" \
+      || die "could not attach the proxy to $NET_ISOLATED"
+    docker restart "$PROXY_NAME" >/dev/null   # bind to the new interface
+  fi
+
+  local waited=0
+  while [ "$waited" -lt 30 ]; do
+    proxy_is_healthy && { info "egress proxy healthy"; return 0; }
+    sleep 1; waited=$((waited + 1))
+  done
+  die "proxy did not become healthy; see: claude-sandbox proxy logs"
+}
+
+cmd_doctor() {
+  local ok=0
+  chk() { if eval "$2" >/dev/null 2>&1; then printf '  \033[32mPASS\033[0m  %s\n' "$1"; else printf '  \033[31mFAIL\033[0m  %s\n' "$1"; ok=1; fi; }
+  printf '\033[1mHost\033[0m\n'
+  chk "docker present"            'command -v docker'
+  chk "docker daemon reachable"   'docker info'
+  printf '  \033[2mINFO\033[0m  platform %s, uid %s, gid %s\n' "$(uname -s)" "$(id -u)" "$(id -g)"
+  detect_identity
+  printf '  \033[2mINFO\033[0m  identity profile %s (agent runs as %s:%s)\n' "$PROFILE" "$RUN_UID" "$RUN_GID"
+  printf '\033[1mImages and infrastructure\033[0m\n'
+  chk "base image $IMAGE_TOOLS"   "docker image inspect '$IMAGE_TOOLS'"
+  chk "proxy image $PROXY_IMAGE"  "docker image inspect '$PROXY_IMAGE'"
+  chk "network $NET_ISOLATED is internal" \
+      "[ \"\$(docker network inspect '$NET_ISOLATED' -f '{{.Internal}}' 2>/dev/null)\" = true ]"
+  chk "egress proxy healthy"      'proxy_is_healthy'
+  if docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1; then
+    printf '  \033[32mPASS\033[0m  auth volume present\n'
+  else
+    printf '  \033[33mSKIP\033[0m  auth volume absent; run: claude-sandbox login\n'
+  fi
+  if [ "$(uname -s)" = Linux ]; then
+    printf '\033[1mDebian-only exposure\033[0m\n'
+    chk "host firewall drops the sandbox subnet" \
+        "iptables -C INPUT -s '$PROXY_SUBNET' -j DROP"
+    [ "$ok" = 0 ] || printf '        fix: sudo iptables -I INPUT -s %s -j DROP\n' "$PROXY_SUBNET"
+  fi
+  return $ok
 }
 
 # The uid the agent runs as, which is also the ownership the auth volume must
@@ -128,12 +247,13 @@ cmd_plugins_import() {
 case ${1-} in
   proxy) shift
     case ${1-up} in
-      up)     exec "${COMPOSE[@]}" up -d --build --wait ;;
-      down)   exec "${COMPOSE[@]}" down ;;
-      logs)   exec "${COMPOSE[@]}" logs -f proxy ;;
-      reload) exec docker exec claude-egress-proxy squid -k reconfigure ;;
+      up)     proxy_up; exit 0 ;;
+      down)   docker rm -f "$PROXY_NAME" >/dev/null 2>&1; info "proxy stopped"; exit 0 ;;
+      logs)   exec docker logs -f "$PROXY_NAME" ;;
+      reload) exec docker exec "$PROXY_NAME" squid -k reconfigure ;;
       *)      die "proxy: expected up, down, logs or reload" ;;
     esac ;;
+  pull)   ensure_image "$IMAGE_TOOLS"; ensure_image "$PROXY_IMAGE"; info "images ready"; exit 0 ;;
   plugins) shift
     sub=${1-}; [ $# -gt 0 ] && shift
     case $sub in
@@ -143,7 +263,7 @@ case ${1-} in
       *)      die "plugins: expected export, import or list" ;;
     esac ;;
   logout) docker volume rm -f "$AUTH_VOLUME" >/dev/null && info "auth volume removed"; exit 0 ;;
-  doctor) shift; exec "$ROOT/test/doctor.sh" "$@" ;;
+  doctor) shift; cmd_doctor; exit $? ;;
   login)  shift; set -- --login "$@" ;;
   -h|--help) sed -n '2,21p' "$0" | grep -v 'shellcheck' | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
@@ -202,8 +322,7 @@ if [ -f "$CTX/Dockerfile" ] && [ -z "${CLAUDE_SANDBOX_IMAGE:-}" ]; then
                  -t "$IMAGE" -f "$CTX/Dockerfile" "$CTX"
   fi
 fi
-docker image inspect "$IMAGE" >/dev/null 2>&1 \
-  || die "image $IMAGE not found. Run: make -C $ROOT build"
+ensure_image "$IMAGE"
 
 # -------------------------------------------------------------- identity ----
 # cap_drop ALL and a runtime uid remap are mutually exclusive: chown needs
@@ -225,15 +344,20 @@ else
 fi
 
 # --------------------------------------------------------------- network ----
-DNS_ARGS=()
+DNS_ARGS=() TMPFS_ARGS=()
 if [ "$OFFLINE" = 1 ]; then
   NETWORK=none
   ENV_ARGS+=(-e SANDBOX_EXPECT_PROXY=0)
-  MOUNTS+=(-v "$ROOT/base/profiles/untrusted.json:/etc/claude-code/managed-settings.d/90-untrusted.json:ro")
+  # The profile is baked into the image, so nothing is bind-mounted from a
+  # repo. Give the drop-in directory a writable tmpfs and the entrypoint copies
+  # it in. Sized and owned so only the agent's own uid can write there.
+  detect_identity
+  TMPFS_ARGS+=("--tmpfs" "/etc/claude-code/managed-settings.d:rw,nosuid,nodev,size=1m,mode=0700,uid=${RUN_UID},gid=${RUN_GID}")
+  ENV_ARGS+=(-e SANDBOX_OFFLINE=1)
   warn "offline: no network, and bypass mode is disabled by the untrusted profile"
 else
   NETWORK=$NET_ISOLATED
-  proxy_is_healthy || { info "starting egress proxy"; "${COMPOSE[@]}" up -d --build --wait; }
+  proxy_is_healthy || { info "starting egress proxy"; proxy_up; }
   # Point the resolver at the proxy's address, where nothing listens on 53.
   # An internal network does NOT remove DNS: Docker's embedded resolver forwards
   # queries through the daemon, which resolves them host-side, outside the
@@ -303,7 +427,7 @@ exec docker run --rm "${TTY[@]}" \
   --name "claude-sandbox-${PROJECT}-$$" \
   --hostname "$PROJECT" \
   --network "$NETWORK" \
-  ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
+  ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${TMPFS_ARGS[@]+"${TMPFS_ARGS[@]}"} \
   "${CAP_ARGS[@]}" "${USER_ARGS[@]}" \
   --security-opt no-new-privileges:true \
   --pids-limit "${SANDBOX_PIDS:-1024}" \

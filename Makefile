@@ -6,13 +6,13 @@ export
 
 IMAGE := $(BASE_IMAGE_NAME):$(CLAUDE_CODE_VERSION)
 
-.PHONY: help build release proxy-up proxy-down proxy-logs login logout install lint test verify smoke bump-claude prune-projects
+.PHONY: help build build-proxy doctor release proxy-up proxy-down proxy-logs login logout install lint test verify smoke bump-claude prune-projects
 
 help: ## Show available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n",$$1,$$2}'
 
-build: ## Build the base image for this machine's native arch
+build: build-proxy ## Build both images for this machine's native arch
 	docker build \
 	  --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
 	  --build-arg NODE_IMAGE=$(NODE_IMAGE) \
@@ -26,14 +26,17 @@ release: ## Build linux/amd64 + linux/arm64 and push to $(REGISTRY)
 	  --attest type=sbom --attest type=provenance,mode=max \
 	  -t $(REGISTRY)/$(IMAGE) --push base
 
-proxy-up: ## Start the shared egress proxy and both networks
-	docker compose -f compose/egress.yml up -d --build --wait
+build-proxy: ## Build the egress proxy image
+	docker build -t $(PROXY_IMAGE_NAME):$(PROXY_IMAGE_TAG) proxy
+
+proxy-up: build-proxy ## Start the shared egress proxy and both networks
+	./bin/claude-sandbox proxy up
 
 proxy-down: ## Stop the egress proxy
-	docker compose -f compose/egress.yml down
+	./bin/claude-sandbox proxy down
 
 proxy-logs: ## Follow the egress audit trail
-	docker compose -f compose/egress.yml logs -f proxy
+	./bin/claude-sandbox proxy logs
 
 login: ## One-time sign-in; the token persists in the auth volume
 	./bin/claude-sandbox login
@@ -51,6 +54,9 @@ lint: ## shellcheck the scripts, hadolint the Dockerfiles
 	  base/rootfs/usr/local/bin/* test/*.sh || echo "shellcheck not installed, skipped"
 	@command -v hadolint >/dev/null && hadolint base/Dockerfile proxy/Dockerfile \
 	  || echo "hadolint not installed, skipped"
+
+doctor: ## Check this host is set up correctly
+	./bin/claude-sandbox doctor
 
 smoke: ## Fast checks that need only the built image
 	./test/smoke.sh

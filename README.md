@@ -10,16 +10,43 @@ an injected instruction from posting your source somewhere. So this pairs a
 hardened container with a default-deny egress proxy, which is the combination
 Anthropic's own guidance says is needed before letting an agent run unattended.
 
-## Quick start
+## Quick start, on a machine with the repo
 
 ```bash
-make build            # base image, native arch
+make build            # both images, native arch
 make proxy-up         # shared egress proxy and the two networks
 make install          # symlink bin/claude-sandbox into ~/.local/bin
 make login            # one-time; run /login and paste the code back
 
 cd ~/git/some-project && claude-sandbox
 ```
+
+## On every other machine, just the script
+
+`bin/claude-sandbox` is standalone. It carries its own defaults and manages the
+proxy with plain docker, so it needs no checkout, no Makefile and no compose
+file. Copy the one file and go:
+
+```bash
+scp bin/claude-sandbox other-host:~/.local/bin/
+ssh other-host
+claude-sandbox pull   # if REGISTRY is set; otherwise docker load the images
+claude-sandbox login
+cd ~/some-project && claude-sandbox
+```
+
+Point it at a registry once per machine, if you publish images with
+`make release`:
+
+```bash
+mkdir -p ~/.config/claude-sandbox
+echo 'REGISTRY=ghcr.io/you' >> ~/.config/claude-sandbox/config
+```
+
+Configuration precedence, highest first: environment variables, then
+`~/.config/claude-sandbox/config`, then `versions.env` if the script happens to
+sit in a checkout, then its built-in defaults. `make smoke` fails if a built-in
+default drifts from `versions.env`.
 
 Then verify it actually does what it claims:
 
@@ -63,6 +90,8 @@ anything itself, so the resolver points at an address with nothing on port 53.
 | `claude-sandbox proxy logs` | Watch every host the agent reaches for |
 | `claude-sandbox plugins export` | Bundle installed plugins for another machine |
 | `claude-sandbox plugins import F` | Restore that bundle here |
+| `claude-sandbox doctor` | Check this host is set up correctly |
+| `claude-sandbox pull` | Fetch both images from the configured registry |
 
 ## What is not in the container
 

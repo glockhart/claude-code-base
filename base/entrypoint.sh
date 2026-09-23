@@ -100,6 +100,21 @@ check_project_settings() {
   done
 }
 
+# --offline used to bind-mount this from the repo, which a standalone launcher
+# does not have. The profile is baked into the image instead, and the launcher
+# mounts a writable tmpfs over the drop-in directory so we can place it here.
+apply_offline_profile() {
+  [ "${SANDBOX_OFFLINE:-0}" = 1 ] || return 0
+  local src=/etc/claude-code/profiles/untrusted.json
+  local dst=/etc/claude-code/managed-settings.d/90-untrusted.json
+  [ -f "$src" ] || { warn "offline profile missing from the image"; return 0; }
+  if cp "$src" "$dst" 2>/dev/null; then
+    log "offline profile applied: bypass mode disabled"
+  else
+    warn "could not apply the offline profile; bypass mode is NOT disabled"
+  fi
+}
+
 # ------------------------------------------------------------------ exec -----
 [ "$#" -gt 0 ] || set -- claude
 
@@ -115,6 +130,7 @@ fi
 [ "${1-}" = "--dropped" ] && shift
 
 sandbox-preflight || exit $?
+apply_offline_profile
 seed_config
 mark_workspace_safe
 check_project_settings
