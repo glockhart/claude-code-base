@@ -82,7 +82,20 @@ out=$(docker run --rm --network "$NET_ISOLATED" --dns "$PROXY_IP" \
 grep -q claude <<<"$out" && pass "lockfile dir is owned by the agent" || fail "lockfile dir not agent-owned: $out"
 grep -q WRITABLE <<<"$out" && pass "agent can write its IDE lockfile" || fail "agent cannot write the lockfile; IDE integration will not work"
 
-head_ "7. Audit trail"
+head_ "7. Allowlist changes can be applied"
+# Editing an allowlist is only useful if it can be applied. `squid -k
+# reconfigure` signals the running master through its pid file, so a
+# `pid_filename none` in squid.conf breaks this path entirely.
+if "$ROOT/bin/claude-sandbox" proxy reload >/dev/null 2>&1; then
+  pass "proxy reload applies allowlist changes without a restart"
+else
+  fail "proxy reload failed; an allowlist edit cannot be applied live"
+fi
+sleep 2
+[ "$(docker inspect -f '{{.State.Health.Status}}' claude-egress-proxy 2>/dev/null)" = healthy ] \
+  && pass "proxy still healthy after reload" || fail "proxy unhealthy after reload"
+
+head_ "8. Audit trail"
 log=$(docker logs claude-egress-proxy 2>/dev/null | tail -200)
 grep -qE 'CONNECT example\.com.*TCP_DENIED' <<<"$log" \
   && pass "denied attempt is in the audit trail, named" || fail "denial not recorded in the proxy log"

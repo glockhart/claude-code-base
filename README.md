@@ -73,6 +73,12 @@ default, no route to a forge. You review the diff and push yourself. That human
 checkpoint is enforced by the absence of a credential rather than by a policy
 line, which is why it is the most valuable control here and costs nothing.
 
+## Plugins
+
+They persist in the auth volume, so no image rebuild is needed. But GitHub is
+not allowlisted by default and most marketplaces live there. See
+[docs/plugins.md](docs/plugins.md).
+
 ## Per-project images
 
 Add `.claude-sandbox/Dockerfile` to a project and the launcher builds and caches
