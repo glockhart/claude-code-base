@@ -67,6 +67,31 @@ carry `.credentials.json` and your session history with it. Copying a
 credential between machines is worth deciding on deliberately rather than doing
 as a side effect of moving plugins.
 
+## There is no declarative install, and it is worth knowing why
+
+It would be tidier to declare plugins in the baked managed settings and have a
+fresh machine pick them up with no install step. That does not work, and the
+settings keys that look like they should do it do not.
+
+`extraKnownMarketplaces` and `enabledPlugins` are real keys, settable at user,
+project and managed scope. But `extraKnownMarketplaces` only registers a
+marketplace as a place to browse, and `enabledPlugins` only toggles a plugin
+that is **already installed**. Neither installs anything.
+
+Confirmed two ways. The settings reference states plainly that none of the
+plugin keys install a plugin. And declaring both keys in the sandbox, at
+project scope and then at managed scope via a `managed-settings.d` drop-in,
+started the agent cleanly but left `plugin marketplace list` and `plugin list`
+both empty.
+
+So installation is per Docker host, by running the commands. They are
+non-interactive, which is what makes a short per-host script the answer.
+
+Two related claims that also did not survive checking, recorded so they are not
+retried: there is no `CLAUDE_CODE_PLUGIN_SEED_DIR` build-time seeding mechanism
+in this version, and the official marketplace auto-install does **not** need
+`github.com`, because it comes from the storage mirror.
+
 ## Two things to know
 
 **Plugins are shared across every project.** The auth volume is deliberately
