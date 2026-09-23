@@ -43,10 +43,11 @@ Both ship in `base/profiles/untrusted.json` instead, applied only by
 
 ## Why the host configuration is not mounted
 
-`~/.claude/settings.json` on this Mac hardcodes `/Users/glen/...` paths across
-nine hooks and a status line, and an nvm Node interpreter that does not exist in
-the container. Mounting it would break all of them. The config directory is also
-345 MB, mostly skills and backups.
+A typical host `~/.claude/settings.json` hardcodes absolute home-directory
+paths across its hooks and status line, and often an nvm Node interpreter that
+does not exist in the container. Mounting it would break all of them. The
+config directory is also routinely hundreds of megabytes, mostly skills and
+backups.
 
 The container gets a minimal seeded settings file instead, and the guardrails
 live in managed settings where a repo cannot override them.

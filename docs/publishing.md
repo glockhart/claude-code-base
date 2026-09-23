@@ -9,35 +9,50 @@ ghcr.io/glockhart/claude-code-base:2.1.278
 ghcr.io/glockhart/claude-sandbox-proxy:1
 ```
 
-Each also carries a `sha-<short>` tag and `latest`.
+Each also carries a `sha-<short>` tag and `latest`. The packages are public, so
+they pull anonymously.
 
-## The images are private, and stay private
+## One manual step after the first publish
 
-A package's visibility is **independent of the repository's**. Packages inherit
-a linked repository's *access permissions* but not its visibility, and the
-default on first publish is private regardless of the repo. Nothing in the
-workflow touches visibility.
+**Packages are private on first publish even from a public repository.**
+Visibility is independent of the repo and always starts private, and nothing in
+the workflow changes it. So after the very first successful run, flip each
+package once by hand:
 
-**Making a package public is irreversible.** There is no way back to private,
-so treat the visibility control on the package page as one-way.
+Package page → gear icon → Package settings → Danger Zone → Change visibility →
+Public. GitHub asks you to type the package name to confirm, and warns that
+**this cannot be undone**.
+
+Do it for both `claude-code-base` and `claude-sandbox-proxy`. Until you do,
+`claude-sandbox pull` on another machine fails, because it is not signing in.
 
 ## Pulling on another machine
 
-You need a **classic** personal access token with the `read:packages` scope.
-**Fine-grained tokens do not work with ghcr.io.** That is a GitHub limitation,
-not a choice here, and it is the one genuinely awkward part of this setup.
+Nothing. Public container packages allow anonymous access, so:
 
 ```bash
-echo "$CR_PAT" | docker login ghcr.io -u glockhart --password-stdin
 claude-sandbox pull
 ```
 
-The credential lands in `~/.docker/config.json` on the host. Note it never
-enters the sandbox: the launcher pulls on the host, and `~/.docker` is not
-among the paths mounted into the container.
+No token, no `docker login`, no credential on disk. This is the main practical
+benefit of public packages over private ones, beyond the billing.
 
-Your everyday `gh` token is not enough. It carries `gist`, `read:org` and
-`repo`, none of which grant package access.
+## What is public, and what is not
+
+Worth being clear about, since the repository is public too.
+
+The images contain **no credentials**. Verified rather than assumed: no
+credential-shaped strings in either image's build history, no tokens in the
+environment, an empty Claude config directory, and a baked `gitconfig` with no
+name or email. Your Anthropic login lives in a Docker volume created at runtime
+by `claude-sandbox login`, and never enters an image.
+
+What is readable: the egress allowlists, the managed settings, the guard
+scripts and the entrypoint. All of that is in the public repository anyway. The
+design does not rely on any of it being secret. The controls that matter are the
+absence of a route out, the absence of credentials in the container, and dropped
+capabilities, and none of those weaken by being known. See
+[threat-model.md](threat-model.md).
 
 ## What runs when
 
@@ -82,6 +97,13 @@ changes, bump the tag in `versions.env` and in the launcher's built-in default,
 or existing machines keep the old policy. `make smoke` enforces that the two
 stay in step.
 
+**Pull requests from forks now run untrusted code on a runner.** That is
+inherent to a public repository and the posture is the standard one: `ci.yml`
+uses `pull_request`, not `pull_request_target`, so a fork's job gets a
+read-only token and no secrets, and it cannot publish. The blast radius is an
+ephemeral runner. Note that the publish workflow is untouched by this, since it
+triggers only on push to `main`.
+
 **Never set the build context to the repository root.** Each build job uses
 `context: base` or `context: proxy`, matching the Makefile. Docker reads
 `.dockerignore` from the root of the build context, so a root-level ignore file
@@ -94,39 +116,13 @@ while the base build carried on succeeding.
 leaves the sandbox unable to start, which is what the old `make release` would
 have done.
 
-**Storage is the binding constraint, and it needs a decision.** Measured
-compressed sizes:
+**Storage and transfer are free.** Package usage is unmetered for public
+packages, so the measured ~536 MB for a two-architecture publish costs nothing,
+and neither does untagged accumulation. Actions minutes are free on public
+repositories too, and arm64 runners get four vCPUs rather than the two they
+get on private ones.
 
-| | per architecture | both |
-|---|---|---|
-| `claude-code-base` | 223 MB | 446 MB |
-| `claude-sandbox-proxy` | 45 MB | 90 MB |
-| **one publish** | | **~536 MB** |
-
-A GitHub Free personal account includes **500 MB** of Packages storage and
-**1 GB/month** of transfer for private packages. One two-architecture publish
-therefore exceeds the storage allowance on its own, before any untagged
-accumulation, and roughly four pulls of the base image exhaust the monthly
-transfer. Pulls made by Actions are free; pulls to a laptop are not. Once the
-quota is used up and no payment method is on file, usage is blocked.
-
-Four ways out, in the order I would consider them:
-
-1. **Publish amd64 only** and keep building locally on the Apple Silicon Mac,
-   which has the repo anyway. One architecture is ~268 MB and fits. The Debian
-   box pulls; the Mac builds.
-2. **Make the two packages public.** Visibility is independent of the
-   repository, so a public package on a private repo is allowed, and public
-   packages are free and unmetered for both storage and transfer. It also
-   removes the classic-token requirement entirely. The cost is that the managed
-   settings, the guard scripts and the allowlists become publicly readable.
-   None of those are credentials and `threat-model.md` does not rely on the
-   allowlist being secret, but this is **irreversible**, so it is a decision
-   rather than a default.
-3. **GitHub Pro**, which raises the allowance to 2 GB and 10 GB.
-4. **Raise the spending limit** and pay metered overage.
-
-**Pruning is not automated, on purpose.** The obvious tool,
+**Pruning is still not automated, on purpose.** The obvious tool,
 `actions/delete-package-versions` with `delete-only-untagged-versions`, is
 unsafe for multi-architecture images: in a manifest list only the index carries
 the tag, and the per-architecture children it points at are untagged versions.

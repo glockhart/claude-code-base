@@ -53,13 +53,10 @@ because there is no request to evaluate. A line every few seconds from
 `make verify` fails on it.
 
 **`could not pull ghcr.io/...`**
-The images are private, so this is almost always a missing registry sign-in.
-Use a **classic** personal access token with `read:packages`; fine-grained
-tokens do not work with ghcr.io.
-
-```bash
-echo "$CR_PAT" | docker login ghcr.io -u glockhart --password-stdin
-```
+The packages are public and pull anonymously, so the usual cause is that a
+freshly published package has not been made public yet. Packages always start
+private, even from a public repository. Flip each one once: package page →
+Package settings → Danger Zone → Change visibility.
 
 If you would rather not depend on the registry, move the images across by hand:
 

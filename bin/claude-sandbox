@@ -92,10 +92,11 @@ ensure_image() {
   if [ -n "$REGISTRY" ]; then
     info "pulling $REGISTRY/$img"
     docker pull "$REGISTRY/$img" >/dev/null || die "could not pull $REGISTRY/$img
-  These images are private. Sign in once per machine with a CLASSIC personal
-  access token carrying the read:packages scope (fine-grained tokens do not
-  work with ghcr.io):
-      echo \"\$CR_PAT\" | docker login ghcr.io -u glockhart --password-stdin"
+  The packages are meant to be public and pull anonymously. If this is a fresh
+  publish, each package starts PRIVATE and has to be made public once by hand:
+  package page -> Package settings -> Danger Zone -> Change visibility.
+  Otherwise sign in with a CLASSIC token carrying read:packages; fine-grained
+  tokens do not work with ghcr.io."
     docker tag "$REGISTRY/$img" "$img"
     return 0
   fi
@@ -278,9 +279,9 @@ case ${1-} in
     for img in "$IMAGE_TOOLS" "$PROXY_IMAGE"; do
       info "pulling $REGISTRY/$img"
       docker pull "$REGISTRY/$img" >/dev/null || die "could not pull $REGISTRY/$img
-  These images are private. Sign in with a CLASSIC token carrying read:packages
-  (fine-grained tokens do not work with ghcr.io):
-      echo \"\$CR_PAT\" | docker login ghcr.io -u glockhart --password-stdin"
+  The packages are meant to be public and pull anonymously. If this is a fresh
+  publish, each package starts PRIVATE and has to be made public once by hand:
+  package page -> Package settings -> Danger Zone -> Change visibility."
       docker tag "$REGISTRY/$img" "$img"
     done
     info "images up to date"; exit 0 ;;

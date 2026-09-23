@@ -30,22 +30,15 @@ file. Copy the one file and go:
 ```bash
 scp bin/claude-sandbox other-host:~/.local/bin/
 ssh other-host
-docker login ghcr.io -u glockhart   # classic PAT with read:packages
-claude-sandbox pull                 # fetches both images
-claude-sandbox login                # one-time Anthropic sign-in
+claude-sandbox pull      # fetches both images, no registry login needed
+claude-sandbox login     # one-time Anthropic sign-in
 cd ~/some-project && claude-sandbox
 ```
 
-The images are published privately to GitHub Container Registry by Actions on
-merge to main, and `REGISTRY` already points there. Sign in once per machine
-with a **classic** personal access token carrying `read:packages`, since
-fine-grained tokens do not work with ghcr.io:
-
-```bash
-echo "$CR_PAT" | docker login ghcr.io -u glockhart --password-stdin
-```
-
-See [docs/publishing.md](docs/publishing.md).
+The images are published to GitHub Container Registry by Actions on merge to
+main, and `REGISTRY` already points there. The packages are public, so pulls
+need no registry authentication at all. See
+[docs/publishing.md](docs/publishing.md).
 
 Configuration precedence, highest first: environment variables, then
 `~/.config/claude-sandbox/config`, then `versions.env` if the script happens to
