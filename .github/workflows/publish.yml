@@ -28,6 +28,7 @@ jobs:
   # Read the tags out of versions.env once, so nothing downstream has to parse
   # it again or hardcode a version. The two images version independently.
   meta:
+    timeout-minutes: 5
     runs-on: ubuntu-24.04
     outputs:
       base_version: ${{ steps.v.outputs.base_version }}
@@ -35,22 +36,35 @@ jobs:
       sha: ${{ steps.v.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - id: v
         run: |
-          set -a; . ./versions.env; set +a
+          set -euo pipefail
+          # Parse, never source. versions.env is a shell file; sourcing it is
+          # arbitrary code execution on the runner.
+          read_var() { sed -n "s/^$1=\(.*\)\$/\1/p" versions.env | tail -n1; }
+          bv=$(read_var CLAUDE_CODE_VERSION); pv=$(read_var PROXY_IMAGE_TAG)
+          # These become -t and --build-arg values, so validate them.
+          [[ $bv =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad CLAUDE_CODE_VERSION '$bv'"; exit 1; }
+          [[ $pv =~ ^[A-Za-z0-9._-]{1,128}$ ]]   || { echo "::error::bad PROXY_IMAGE_TAG '$pv'"; exit 1; }
           {
-            echo "base_version=$CLAUDE_CODE_VERSION"
-            echo "proxy_version=$PROXY_IMAGE_TAG"
-            echo "sha=sha-$(git rev-parse --short HEAD)"
+            echo "base_version=$bv"
+            echo "proxy_version=$pv"
+            echo "sha=sha-${GITHUB_SHA::7}"
           } >> "$GITHUB_OUTPUT"
 
   # Gate the publish on the suites. Builds for the runner's own architecture
   # only; the multi-arch build follows and reuses the layer cache.
   test:
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v4
+        with:
+          persist-credentials: false
+      # No buildx here on purpose: `make build` must land in the local image
+      # store for the suites to run against. See the note in ci.yml.
       - run: make build
       - run: make smoke
       - run: ./bin/claude-sandbox proxy up
@@ -64,6 +78,7 @@ jobs:
   # assertion and a full-filesystem find, all target-architecture binaries that
   # crawl under emulation.
   build:
+    timeout-minutes: 30
     needs: [meta, test]
     strategy:
       fail-fast: false
@@ -75,6 +90,8 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -85,7 +102,10 @@ jobs:
       - name: Resolve image name
         id: n
         run: |
-          set -a; . ./versions.env; set +a
+          set -euo pipefail
+          read_var() { sed -n "s/^$1=\(.*\)\$/\1/p" versions.env | tail -n1; }
+          BASE_IMAGE_NAME=$(read_var BASE_IMAGE_NAME)
+          PROXY_IMAGE_NAME=$(read_var PROXY_IMAGE_NAME)
           case "${{ matrix.image }}" in
             base)  echo "name=$BASE_IMAGE_NAME"  >> "$GITHUB_OUTPUT" ;;
             proxy) echo "name=$PROXY_IMAGE_NAME" >> "$GITHUB_OUTPUT" ;;
@@ -104,8 +124,10 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ steps.n.outputs.name }},push-by-digest=true,name-canonical=true,push=true
           # Scoped per image and platform. Four jobs share one 10GB LRU cache;
           # an unscoped key means they evict each other and nothing ever hits.
+          provenance: false
+          sbom: false
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=min,scope=${{ matrix.image }}-${{ matrix.platform.arch }}
 
       - name: Export digest
         env:
@@ -122,6 +144,7 @@ jobs:
   # Stitch the per-platform digests into one manifest list per image and apply
   # the tags. Until this runs the pushed digests are untagged and invisible.
   merge:
+    timeout-minutes: 10
     needs: [meta, build]
     runs-on: ubuntu-24.04
     strategy:
@@ -129,6 +152,8 @@ jobs:
         image: [base, proxy]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -143,7 +168,10 @@ jobs:
 
       - name: Create the manifest list
         run: |
-          set -a; . ./versions.env; set +a
+          set -euo pipefail
+          read_var() { sed -n "s/^$1=\(.*\)\$/\1/p" versions.env | tail -n1; }
+          BASE_IMAGE_NAME=$(read_var BASE_IMAGE_NAME)
+          PROXY_IMAGE_NAME=$(read_var PROXY_IMAGE_NAME)
           case "${{ matrix.image }}" in
             base)  name=$BASE_IMAGE_NAME;  version=${{ needs.meta.outputs.base_version }} ;;
             proxy) name=$PROXY_IMAGE_NAME; version=${{ needs.meta.outputs.proxy_version }} ;;
@@ -154,25 +182,20 @@ jobs:
           docker buildx imagetools create \
             -t "$repo:$version" \
             -t "$repo:${{ needs.meta.outputs.sha }}" \
-            -t "$repo:latest" \
+            $([ "${{ github.ref }}" = refs/heads/main ] && echo -t "$repo:latest") \
             $(cd /tmp/digests && printf "${repo}@sha256:%s " *)
           docker buildx imagetools inspect "$repo:$version"
 
-  # Untagged versions pile up on every push and bill as storage on a private
-  # repo. Non-fatal: user-owned packages are a known rough edge for
-  # GITHUB_TOKEN, and a permissions wrinkle must not fail a good publish.
-  prune:
-    needs: merge
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    strategy:
-      matrix:
-        package: [claude-code-base, claude-sandbox-proxy]
-    steps:
-      - uses: actions/delete-package-versions@v5
-        with:
-          package-name: ${{ matrix.package }}
-          package-type: container
-          delete-only-untagged-versions: "true"
-          min-versions-to-keep: 5
-          token: ${{ secrets.GITHUB_TOKEN }}
+  # NO automatic prune job here, deliberately.
+  #
+  # The obvious choice, actions/delete-package-versions with
+  # delete-only-untagged-versions, is unsafe for multi-architecture images. In
+  # a manifest list only the INDEX carries the tag; the per-architecture child
+  # manifests it points at are untagged versions. That action would delete the
+  # children of a live :latest, leaving an index pointing at nothing and pulls
+  # failing with MANIFEST_UNKNOWN. It is a common self-inflicted registry
+  # outage and it is not worth automating blind.
+  #
+  # Untagged digests do still accumulate on every push and bill as storage on a
+  # private package. See docs/publishing.md for how to prune deliberately once
+  # the storage question below is settled.

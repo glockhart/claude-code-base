@@ -20,9 +20,12 @@ concurrency:
 
 jobs:
   lint:
+    timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Install linters
         run: |
           sudo apt-get update && sudo apt-get install -y shellcheck
@@ -35,13 +38,17 @@ jobs:
           CI: "true"
 
   test:
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      # Build for this runner's own architecture and load it, because the
-      # suites need a real local image to inspect and run.
-      - uses: docker/setup-buildx-action@v4
+      # Deliberately no setup-buildx-action here. It makes a docker-container
+      # builder current, and `docker build` against that driver leaves nothing
+      # in the local image store, so the suites would find no image. The
+      # runner's default docker driver loads normally.
       - name: Build both images
         run: make build
 

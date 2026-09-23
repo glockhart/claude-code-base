@@ -270,7 +270,20 @@ case ${1-} in
     printf 'CONFIG_FILE=%s\n' "$([ -f "$HOME/.config/claude-sandbox/config" ] && echo "$HOME/.config/claude-sandbox/config" || echo "(none)")"
     printf 'VERSIONS_ENV=%s\n' "$([ -f "$ROOT/versions.env" ] && echo "$ROOT/versions.env" || echo "(none, using built-in defaults)")"
     exit 0 ;;
-  pull)   ensure_image "$IMAGE_TOOLS"; ensure_image "$PROXY_IMAGE"; info "images ready"; exit 0 ;;
+  pull)
+    # Deliberately NOT ensure_image: that returns early when the image already
+    # exists locally, which made `pull` a no-op on exactly the machines that
+    # wanted an update. Always go to the registry.
+    [ -n "$REGISTRY" ] || die "REGISTRY is unset; nothing to pull from"
+    for img in "$IMAGE_TOOLS" "$PROXY_IMAGE"; do
+      info "pulling $REGISTRY/$img"
+      docker pull "$REGISTRY/$img" >/dev/null || die "could not pull $REGISTRY/$img
+  These images are private. Sign in with a CLASSIC token carrying read:packages
+  (fine-grained tokens do not work with ghcr.io):
+      echo \"\$CR_PAT\" | docker login ghcr.io -u glockhart --password-stdin"
+      docker tag "$REGISTRY/$img" "$img"
+    done
+    info "images up to date"; exit 0 ;;
   plugins) shift
     sub=${1-}; [ $# -gt 0 ] && shift
     case $sub in

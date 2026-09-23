@@ -62,12 +62,22 @@ head_ "4. Privilege posture at runtime"
 sbx 'test -S /var/run/docker.sock' && fail "docker socket is mounted" || pass "no docker socket"
 
 head_ "5. The preflight fails closed"
-# Attach to a normal bridge, which is the realistic misconfiguration: a project
-# compose file adds a service and Docker quietly attaches a second network.
-if docker run --rm --user 1000:1000 --entrypoint /usr/local/bin/sandbox-preflight "$IMG" >/dev/null 2>&1; then
-  fail "preflight passed on an unrestricted network; it should have refused"
+# Preflight exits 70 for either of two reasons, and on the default bridge the
+# proxy is always unreachable, so checking only the exit status would pass even
+# when the egress check never ran. Assert the specific reason, and skip where
+# the branch cannot be exercised.
+probe=$(docker run --rm --entrypoint bash "$IMG" -c \
+  "timeout 3 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' && echo UP || echo DOWN" 2>/dev/null)
+if [ "$probe" != UP ]; then
+  skip "this host cannot reach 1.1.1.1:443, so the direct-egress branch is unreachable"
 else
-  pass "preflight refuses to start when direct egress is reachable"
+  err=$(docker run --rm --user 1000:1000 \
+          --entrypoint /usr/local/bin/sandbox-preflight "$IMG" 2>&1); rc=$?
+  if [ "$rc" -eq 70 ] && grep -q 'direct egress reachable' <<<"$err"; then
+    pass "preflight refuses, naming direct egress as the reason"
+  else
+    fail "preflight did not refuse for the right reason (rc=$rc): ${err:-no output}"
+  fi
 fi
 
 head_ "6. Editor integration prerequisites"
@@ -91,9 +101,10 @@ if "$ROOT/bin/claude-sandbox" proxy reload >/dev/null 2>&1; then
 else
   fail "proxy reload failed; an allowlist edit cannot be applied live"
 fi
-sleep 2
-[ "$(docker inspect -f '{{.State.Health.Status}}' claude-egress-proxy 2>/dev/null)" = healthy ] \
-  && pass "proxy still healthy after reload" || fail "proxy unhealthy after reload"
+# Inspecting the health status here would report the stale pre-reload result,
+# because the healthcheck interval is 15s. Run it synchronously.
+docker exec claude-egress-proxy /usr/local/bin/squid-health \
+  && pass "proxy answers correctly after reload" || fail "proxy unhealthy after reload"
 
 head_ "8. Audit trail"
 log=$(docker logs claude-egress-proxy 2>/dev/null | tail -200)

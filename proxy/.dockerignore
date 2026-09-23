@@ -1,0 +1,3 @@
+# Gitignored and never COPYed, but its presence changes the context hash
+# and busts the layer cache on any machine that has one.
+allowlist.local.conf
