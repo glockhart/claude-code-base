@@ -10,21 +10,21 @@
     "    stop having any effect, defeating per-project configuration.",
     "Both ship in profiles/untrusted.json instead, applied by --offline.",
     "",
+    "Use Edit(path), never Write(path): Edit covers every file-editing tool, and",
+    "a Write(path) rule is not matched by file permission checks at all.",
+    "",
     "NOTE: deny rules do NOT apply under --dangerously-skip-permissions. Anything",
     "that must hold in both modes lives in the PreToolUse hook below, which fires",
     "from the tool execution path independently of the permission engine."
   ],
   "permissions": {
     "deny": [
-      "Write(.git/hooks/**)",
       "Edit(.git/hooks/**)",
-      "Write(.github/workflows/**)",
       "Edit(.github/workflows/**)",
-      "Write(.devcontainer/**)",
       "Edit(.devcontainer/**)",
-      "Write(.mcp.json)",
-      "Write(.claude/settings.json)",
-      "Write(.claude/settings.local.json)",
+      "Edit(.mcp.json)",
+      "Edit(.claude/settings.json)",
+      "Edit(.claude/settings.local.json)",
       "Read(**/.env)",
       "Read(**/.env.*)",
       "Read(**/*.pem)",
@@ -51,7 +51,11 @@
       {
         "matcher": "Bash|Read|Edit|Write|NotebookEdit",
         "hooks": [
-          { "type": "command", "command": "/usr/local/bin/sandbox-secret-guard", "timeout": 5 }
+          {
+            "type": "command",
+            "command": "/usr/local/bin/sandbox-secret-guard",
+            "timeout": 5
+          }
         ]
       }
     ]

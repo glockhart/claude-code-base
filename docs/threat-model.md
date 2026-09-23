@@ -69,6 +69,14 @@ workflow files and devcontainer files. As host-side belt and braces:
 git config --global core.hooksPath ~/.git-hooks   # ignore repo-local hooks
 ```
 
+**The shell path is best-effort.** A tool call names its file, so the hook and
+the deny rules see it exactly. A shell command does not: `cd .github/workflows`
+may precede a write, while `cat .github/workflows/ci.yml` is an everyday read.
+Refusing every mention would make ordinary work painful, so only the paths that
+are dangerous *and* rarely read from a shell are blocked on mention: git hooks,
+`.mcp.json`, and project settings files. Workflow and devcontainer files are
+protected against the editing tools but not against a determined shell command.
+
 But the real control is reading the diff before running anything.
 
 **Theft of the container's own token.** Any process inside can read it, and

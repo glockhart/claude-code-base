@@ -13,6 +13,18 @@ Highest first:
 4. **`$CLAUDE_CONFIG_DIR/settings.json`** — seeded once on first run, then
    yours to edit. Lives in the auth volume.
 
+## Use `Edit(path)`, never `Write(path)`
+
+A `Write(path)` deny rule is **not matched by file permission checks**. Only
+`Edit(path)` rules are, and an `Edit` rule covers every file-editing tool,
+including Write. The CLI prints a warning per offending rule at startup and the
+rule then silently protects nothing.
+
+This bit the base policy: `.mcp.json` and both project settings files were
+listed only as `Write(...)`, so they were unprotected until it was fixed.
+`make smoke` now fails if any `Write(path)` rule reappears in the deny list, and
+asserts each expected `Edit(...)` rule is present.
+
 ## Two keys deliberately left unset
 
 Anthropic's worked example of a managed settings file includes two keys that

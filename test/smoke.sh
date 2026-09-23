@@ -44,6 +44,16 @@ run 'jq -e ".allowManagedPermissionRulesOnly // empty" /etc/claude-code/managed-
   || pass "project permission rules still apply"
 [ "$(run 'stat -c %a /usr/local/bin/sandbox-secret-guard')" = 555 ] \
   && pass "secret guard is not agent-writable" || fail "secret guard is writable"
+# A Write(path) deny rule is NOT matched by file permission checks. The CLI
+# warns at startup and the rule silently does nothing, so three rules here once
+# protected nothing at all. Edit(path) covers every file-editing tool.
+bad=$(run 'jq -r ".permissions.deny[]" /etc/claude-code/managed-settings.json | grep "^Write(" || true')
+[ -z "$bad" ] && pass "no ineffective Write(path) deny rules" \
+  || fail "Write(path) deny rules do nothing; use Edit(path): $(tr "\n" " " <<<"$bad")"
+for f in '.git/hooks/**' '.github/workflows/**' '.devcontainer/**' '.mcp.json' '.claude/settings.json'; do
+  run "jq -e '.permissions.deny | index(\"Edit($f)\")' /etc/claude-code/managed-settings.json" >/dev/null \
+    && pass "Edit($f) is denied" || fail "Edit($f) is not denied"
+done
 
 head_ "4. The agent runs"
 v=$(docker run --rm --entrypoint claude "$IMG" --version 2>/dev/null | head -1)
@@ -57,6 +67,19 @@ guard() { docker run --rm -i --entrypoint /usr/local/bin/sandbox-secret-guard "$
   && pass "blocks reads of ssh keys" || fail "ssh key read was allowed"
 [ "$(guard '{"tool_name":"Edit","tool_input":{"file_path":"/workspace/p/src/main.rs"}}')" = 0 ] \
   && pass "allows ordinary source edits" || fail "ordinary edit was blocked"
+# The self-widening vectors. These must hold even under --yolo, where deny
+# rules are bypassed entirely, which is why they live in the hook as well.
+[ "$(guard '{"tool_name":"Write","tool_input":{"file_path":"/workspace/p/.mcp.json"}}')" = 2 ] \
+  && pass "blocks writes to .mcp.json" || fail ".mcp.json write was allowed"
+[ "$(guard '{"tool_name":"Edit","tool_input":{"file_path":".claude/settings.json"}}')" = 2 ] \
+  && pass "blocks writes to project settings" || fail "project settings write was allowed"
+[ "$(guard '{"tool_name":"Bash","tool_input":{"command":"echo x >> .git/hooks/pre-push"}}')" = 2 ] \
+  && pass "blocks shell writes into git hooks" || fail "shell write into git hooks was allowed"
+# Reading these is legitimate and must stay allowed, or ordinary work suffers.
+[ "$(guard '{"tool_name":"Read","tool_input":{"file_path":".claude/settings.json"}}')" = 0 ] \
+  && pass "still allows reading project settings" || fail "reading project settings was blocked"
+[ "$(guard '{"tool_name":"Bash","tool_input":{"command":"cat .github/workflows/ci.yml"}}')" = 0 ] \
+  && pass "still allows reading workflow files" || fail "reading a workflow file was blocked"
 head_ "6. Launcher argument handling"
 # Regression: --shell used to discard passthrough args, so it could not be
 # scripted and every non-interactive use silently did nothing.
