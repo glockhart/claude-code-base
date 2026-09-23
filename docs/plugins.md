@@ -2,61 +2,78 @@
 
 **Plugins persist in a volume. You do not rebuild the image to install one.**
 
-They live in `$CLAUDE_CONFIG_DIR/plugins`, which is inside the shared
+They live in `$CLAUDE_CONFIG_DIR/plugins`, inside the shared
 `claude-sandbox-auth` volume. Install one once and it survives `--rm`, survives
-an image rebuild, and is available in every project.
+an image rebuild, and is available in every project on that machine.
 
-Verified: a file written to the plugins directory is still there in a fresh
-container, and visible from a different project.
+## The official marketplace works with the default allowlist
 
-## The catch: most marketplaces are on GitHub
-
-`github.com` is **not** in the default allowlist, and the official marketplace
-is a GitHub repository. So installing from it fails until you opt in.
-
-Reachable from the sandbox today:
-
-| Host | Used for |
-|---|---|
-| `registry.npmjs.org` | npm-source plugin packages and their dependencies |
-| `downloads.claude.ai` | plugin executable downloads |
-| `storage.googleapis.com` | install counts and metadata in the plugin list |
-| `raw.githubusercontent.com` | raw file fetches |
-
-Denied by default: `github.com`, `codeload.github.com`,
-`objects.githubusercontent.com`.
-
-## Enabling GitHub marketplaces
-
-Uncomment these in `proxy/allowlist.optional.conf`:
-
-```
-.github.com
-.githubusercontent.com
-codeload.github.com
-```
-
-Then apply it without dropping connections:
+Despite being labelled "Source: GitHub", the official marketplace is fetched
+from a Google Cloud Storage mirror, not cloned from GitHub. Since
+`storage.googleapis.com` is already allowlisted, it installs on first run and
+its plugins install normally, non-interactively:
 
 ```bash
-claude-sandbox proxy reload
+claude plugin marketplace list
+claude plugin install <name>@claude-plugins-official
 ```
 
-Consider turning it back off once the plugin is installed. The plugin itself
-keeps working, because it is already on the volume. See the note on GitHub as
-an exfiltration channel in [threat-model.md](threat-model.md): what actually
-binds is the absence of a write credential in the container, not the absence of
-the host.
+Verified end to end in the sandbox with `github.com` denied.
+
+**GitHub is only needed for third-party marketplaces** added straight from a
+repository, such as `claude plugin marketplace add owner/repo`. Those fail
+against the default allowlist, and the proxy log shows
+`CONNECT github.com:443 ... TCP_DENIED`. To allow them, uncomment the GitHub
+lines in `proxy/allowlist.optional.conf` and run `claude-sandbox proxy reload`.
+
+## Moving plugins to another machine
+
+A named Docker volume belongs to one Docker daemon. The volume on your Mac and
+the volume on the Debian box are different volumes, so plugins do not transfer
+by themselves.
+
+Note the unit is the **Docker host**, not the machine you sit at. Working on
+the Debian box over Remote SSH from the Mac uses the Debian volume, so that is
+one place to set up, not two.
+
+Two ways to reproduce them, both fine:
+
+**Re-run the installs.** The commands are non-interactive, so a short script
+run once per machine is the simplest reproducible answer, and it is the option
+that keeps the credential out of it.
+
+```bash
+claude-sandbox --shell -- -c 'claude plugin install agent-sdk-dev@claude-plugins-official'
+```
+
+**Or copy the volume.** This works cleanly, because every path recorded inside
+is container-absolute (`/home/claude/.claude/plugins/...`) and therefore
+identical on any host. Nothing records a host home directory.
+
+```bash
+# on the source machine
+docker run --rm -v claude-sandbox-auth:/src -v "$PWD":/out alpine \
+  tar czf /out/plugins.tgz -C /src plugins
+
+# on the target machine, after copying plugins.tgz across
+docker run --rm -v claude-sandbox-auth:/dst -v "$PWD":/in alpine \
+  tar xzf /in/plugins.tgz -C /dst
+```
+
+Verified: exporting and restoring into a fresh volume reproduces the full tree.
+
+Export **only** the `plugins` subtree, as above. Taking the whole volume would
+carry `.credentials.json` and your session history with it. Copying a
+credential between machines is worth deciding on deliberately rather than doing
+as a side effect of moving plugins.
 
 ## Two things to know
 
 **Plugins are shared across every project.** The auth volume is deliberately
-shared so you sign in once. Plugins ride along, so a plugin installed while
-working on one repo is active in all of them. If you want a plugin scoped to
-one project, use that project's own `.claude/settings.json` rather than
-installing it globally.
+shared so you sign in once, and plugins ride along. A plugin installed while
+working on one repo is active in all of them. To scope one to a single project,
+declare it in that project's own `.claude/settings.json` instead.
 
-**A plugin is code that runs inside the agent.** It runs with the same reach as
-the agent: your mounted repo, the auth token, and whatever the allowlist
-permits. The sandbox contains the blast radius, it does not vet the plugin.
-Install plugins you would be willing to run on the host.
+**A plugin is code that runs inside the agent,** with the same reach: your
+mounted repo, the auth token, and whatever the allowlist permits. The sandbox
+bounds the blast radius, it does not vet the plugin.

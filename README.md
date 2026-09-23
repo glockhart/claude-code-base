@@ -75,8 +75,9 @@ line, which is why it is the most valuable control here and costs nothing.
 
 ## Plugins
 
-They persist in the auth volume, so no image rebuild is needed. But GitHub is
-not allowlisted by default and most marketplaces live there. See
+They persist in the auth volume, so no image rebuild is needed. The official
+marketplace works with the default allowlist. Volumes are per Docker host, so
+set them up once per host or copy the plugins subtree across. See
 [docs/plugins.md](docs/plugins.md).
 
 ## Per-project images
