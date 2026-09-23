@@ -46,26 +46,35 @@ that keeps the credential out of it.
 claude-sandbox --shell -- -c 'claude plugin install agent-sdk-dev@claude-plugins-official'
 ```
 
-**Or copy the volume.** This works cleanly, because every path recorded inside
-is container-absolute (`/home/claude/.claude/plugins/...`) and therefore
-identical on any host. Nothing records a host home directory.
+**Or move them with the launcher.** This works cleanly because every path
+recorded inside is container-absolute (`/home/claude/.claude/plugins/...`) and
+therefore identical on any host. Nothing records a host home directory.
 
 ```bash
 # on the source machine
-docker run --rm -v claude-sandbox-auth:/src -v "$PWD":/out alpine \
-  tar czf /out/plugins.tgz -C /src plugins
+claude-sandbox plugins export                 # writes claude-plugins-<date>.tgz
+claude-sandbox plugins list                   # see what you have
 
-# on the target machine, after copying plugins.tgz across
-docker run --rm -v claude-sandbox-auth:/dst -v "$PWD":/in alpine \
-  tar xzf /in/plugins.tgz -C /dst
+# copy the archive across, then on the target machine
+claude-sandbox plugins import claude-plugins-20260101.tgz
 ```
 
-Verified: exporting and restoring into a fresh volume reproduces the full tree.
+These are launcher subcommands rather than Make targets on purpose. The
+launcher is the one thing that gets symlinked onto every machine; the Makefile
+is repo tooling for building the image.
 
-Export **only** the `plugins` subtree, as above. Taking the whole volume would
-carry `.credentials.json` and your session history with it. Copying a
-credential between machines is worth deciding on deliberately rather than doing
-as a side effect of moving plugins.
+Two safety properties, both covered by `make smoke`:
+
+- **Export takes only the `plugins` subtree.** The volume also holds
+  `.credentials.json` and your session history. Moving a credential between
+  machines should be a decision, not a side effect of moving plugins.
+- **Import refuses an archive that reaches outside `plugins/`.** Extracting an
+  arbitrary tarball into the auth volume could otherwise overwrite the
+  credential or plant a settings file.
+
+Import also fixes ownership to the uid the agent runs as. A plain `tar` as root
+leaves files the agent cannot read, which presents as plugins silently not
+loading.
 
 ## There is no declarative install, and it is worth knowing why
 

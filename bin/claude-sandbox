@@ -6,6 +6,7 @@
 # Usage:
 #   claude-sandbox [flags] [-- claude args...]
 #   claude-sandbox proxy up|down|logs|reload
+#   claude-sandbox plugins export [FILE] | plugins import FILE | plugins list
 #   claude-sandbox login | logout | doctor
 #
 # Flags:
@@ -41,9 +42,86 @@ warn() { printf '\033[33m[sandbox]\033[0m %s\n' "$*" >&2; }
 sha()  { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi; }
 
 COMPOSE=(docker compose -f "$ROOT/compose/egress.yml")
+IMAGE_TOOLS=${BASE_IMAGE_NAME}:${CLAUDE_CODE_VERSION}
 
 proxy_is_healthy() {
   [ "$(docker inspect -f '{{.State.Health.Status}}' claude-egress-proxy 2>/dev/null)" = healthy ]
+}
+
+# The uid the agent runs as, which is also the ownership the auth volume must
+# have. Shared by the run path and by plugins import, which would otherwise
+# leave root-owned files the agent cannot read.
+detect_identity() {
+  if [ "$(uname -s)" = Darwin ] || { [ "$(id -u)" = 1000 ] && [ "$(id -g)" = 1000 ]; }; then
+    RUN_UID=1000 RUN_GID=1000 PROFILE=A
+  else
+    RUN_UID=$(id -u) RUN_GID=$(id -g) PROFILE=B
+  fi
+}
+
+# --------------------------------------------------------------- plugins ----
+# Plugins live in the auth volume, and a named volume belongs to one Docker
+# daemon. These move the plugins subtree between hosts. There is no declarative
+# alternative: the settings keys that look like they would install plugins only
+# register marketplaces and toggle already-installed ones. See docs/plugins.md.
+
+plugins_volume_or_die() {
+  docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
+    || die "no auth volume '$AUTH_VOLUME' on this machine. Run: claude-sandbox login"
+}
+
+cmd_plugins_list() {
+  plugins_volume_or_die
+  docker run --rm -v "$AUTH_VOLUME:/v:ro" --entrypoint sh "$IMAGE_TOOLS" -c '
+    test -d /v/plugins || { echo "no plugins directory yet"; exit 0; }
+    echo "installed plugins:"
+    jq -r ".plugins | keys[]?" /v/plugins/installed_plugins.json 2>/dev/null \
+      | sed "s/^/  /" | grep . || echo "  (none)"
+    echo "marketplaces:"
+    jq -r "keys[]?" /v/plugins/known_marketplaces.json 2>/dev/null \
+      | sed "s/^/  /" | grep . || echo "  (none)"'
+}
+
+cmd_plugins_export() {
+  local out=${1:-claude-plugins-$(date +%Y%m%d).tgz} dir base
+  plugins_volume_or_die
+  dir=$(cd "$(dirname "$out")" 2>/dev/null && pwd) || die "cannot resolve directory for $out"
+  base=$(basename "$out")
+  [ -e "$dir/$base" ] && die "$dir/$base already exists; choose another name"
+
+  # Only the plugins subtree. The volume also holds .credentials.json and your
+  # session history, and moving a credential between machines should be a
+  # decision, not a side effect of moving plugins.
+  docker run --rm -v "$AUTH_VOLUME:/src:ro" -v "$dir:/out" --entrypoint sh "$IMAGE_TOOLS" -c "
+    test -d /src/plugins || { echo 'no plugins to export' >&2; exit 3; }
+    tar czf '/out/$base' -C /src plugins
+    chown $(id -u):$(id -g) '/out/$base' 2>/dev/null || true" \
+    || die "export failed"
+
+  info "exported plugins only, no credentials, to $dir/$base"
+  info "copy it to the other machine, then: claude-sandbox plugins import $base"
+}
+
+cmd_plugins_import() {
+  local src=${1-} dir base stray
+  [ -n "$src" ] || die "usage: claude-sandbox plugins import <file.tgz>"
+  [ -f "$src" ] || die "no such file: $src"
+  plugins_volume_or_die
+  dir=$(cd "$(dirname "$src")" && pwd); base=$(basename "$src")
+
+  # Refuse an archive that reaches outside plugins/. Extracting into the auth
+  # volume could otherwise overwrite .credentials.json or plant a settings file.
+  stray=$(tar tzf "$src" | grep -vE '^\.?/?plugins(/|$)' | head -5 || true)
+  [ -z "$stray" ] || die "refusing: archive writes outside plugins/: $(tr '\n' ' ' <<<"$stray")"
+
+  detect_identity
+  docker run --rm -v "$AUTH_VOLUME:/dst" -v "$dir:/in:ro" --entrypoint sh "$IMAGE_TOOLS" -c "
+    tar xzf '/in/$base' -C /dst
+    chown -R ${RUN_UID}:${RUN_GID} /dst/plugins" \
+    || die "import failed"
+
+  info "imported into $AUTH_VOLUME, owned by ${RUN_UID}:${RUN_GID} (profile $PROFILE)"
+  cmd_plugins_list
 }
 
 # ----------------------------------------------------------- subcommands ----
@@ -56,10 +134,18 @@ case ${1-} in
       reload) exec docker exec claude-egress-proxy squid -k reconfigure ;;
       *)      die "proxy: expected up, down, logs or reload" ;;
     esac ;;
+  plugins) shift
+    sub=${1-}; [ $# -gt 0 ] && shift
+    case $sub in
+      export) cmd_plugins_export "$@"; exit 0 ;;
+      import) cmd_plugins_import "$@"; exit 0 ;;
+      list)   cmd_plugins_list "$@";   exit 0 ;;
+      *)      die "plugins: expected export, import or list" ;;
+    esac ;;
   logout) docker volume rm -f "$AUTH_VOLUME" >/dev/null && info "auth volume removed"; exit 0 ;;
   doctor) shift; exec "$ROOT/test/doctor.sh" "$@" ;;
   login)  shift; set -- --login "$@" ;;
-  -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,21p' "$0" | grep -v 'shellcheck' | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 # ----------------------------------------------------------------- flags ----

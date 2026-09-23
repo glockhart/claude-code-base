@@ -85,4 +85,31 @@ head_ "6. Launcher argument handling"
 # scripted and every non-interactive use silently did nothing.
 out=$(cd /tmp && "$ROOT/bin/claude-sandbox" --offline --shell -- -c 'echo SHELL_PASSTHRU_OK' 2>/dev/null | tr -d '\r')
 grep -q SHELL_PASSTHRU_OK <<<"$out" && pass "--shell passes arguments through" || fail "--shell dropped its arguments"
+head_ "7. Plugin export and import"
+SBX="$ROOT/bin/claude-sandbox"
+tmp=$(mktemp -d)
+# An archive reaching outside plugins/ must be refused: extracting it into the
+# auth volume would overwrite .credentials.json or plant a settings file.
+mkdir -p "$tmp/evil/plugins"; echo x > "$tmp/evil/.credentials.json"; echo x > "$tmp/evil/plugins/f"
+tar czf "$tmp/evil.tgz" -C "$tmp/evil" .credentials.json plugins 2>/dev/null
+if (cd "$tmp" && "$SBX" plugins import evil.tgz) >/dev/null 2>&1; then
+  fail "import accepted an archive that writes outside plugins/"
+else
+  pass "import refuses an archive that escapes plugins/"
+fi
+# Export must never include the credential or session history.
+if docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1 \
+   && docker run --rm -v "$AUTH_VOLUME:/v:ro" --entrypoint test "$IMG" -d /v/plugins; then
+  (cd "$tmp" && "$SBX" plugins export p.tgz) >/dev/null 2>&1
+  if [ -f "$tmp/p.tgz" ]; then
+    stray=$(tar tzf "$tmp/p.tgz" | grep -vE '^plugins(/|$)' | head -3)
+    [ -z "$stray" ] && pass "export contains only the plugins subtree" \
+      || fail "export leaked paths outside plugins/: $(tr '\n' ' ' <<<"$stray")"
+  else
+    fail "export produced no archive"
+  fi
+else
+  skip "no plugins in the auth volume to export"
+fi
+rm -rf "$tmp"
 summary

@@ -61,6 +61,8 @@ anything itself, so the resolver points at an address with nothing on port 53.
 | `claude-sandbox --offline` | No network at all, plus a stricter policy. For code you do not trust |
 | `claude-sandbox --env-file F` | Inject secrets for one run only |
 | `claude-sandbox proxy logs` | Watch every host the agent reaches for |
+| `claude-sandbox plugins export` | Bundle installed plugins for another machine |
+| `claude-sandbox plugins import F` | Restore that bundle here |
 
 ## What is not in the container
 
