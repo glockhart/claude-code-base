@@ -6,6 +6,9 @@ LABEL org.opencontainers.image.source="https://github.com/glockhart/claude-code-
 LABEL org.opencontainers.image.description="Default-deny egress proxy for the Claude Code sandbox"
 LABEL org.opencontainers.image.licenses="MIT"
 
+# Unpinned on purpose: this image is the enforcement point, so it has to be
+# rebuildable onto Debian's current squid the day a security update lands.
+# hadolint ignore=DL3008
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends squid ca-certificates; \
