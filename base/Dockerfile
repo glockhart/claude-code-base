@@ -10,6 +10,9 @@
 # with ordinary egress. That is why no proxy address is baked into the image.
 
 ARG NODE_IMAGE=node:22-bookworm-slim
+# The tag lives in the ARG default above, and in versions.env; hadolint cannot
+# resolve an ARG, so it sees an untagged FROM.
+# hadolint ignore=DL3006
 FROM ${NODE_IMAGE}
 
 ARG CLAUDE_CODE_VERSION
@@ -25,6 +28,10 @@ LABEL org.opencontainers.image.licenses="MIT"
 # --- tooling -----------------------------------------------------------------
 # Only what the sandbox itself needs, or what is useful in ANY repository.
 # Language toolchains belong in per-project images layered on top of this one.
+# Deliberately unpinned: a pinned apt version holds the image at a known-old
+# package the day Debian ships a security update. Rebuilding is how this image
+# takes those, so pinning would work against the thing it looks like it helps.
+# hadolint ignore=DL3008
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -41,7 +48,11 @@ RUN set -eux; \
     test -n "${CLAUDE_CODE_VERSION}"; \
     npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     npm cache clean --force; \
-    claude --version | grep -q "${CLAUDE_CODE_VERSION}"
+    installed=$(claude --version); \
+    case "$installed" in \
+      *"${CLAUDE_CODE_VERSION}"*) ;; \
+      *) echo "installed '$installed', expected ${CLAUDE_CODE_VERSION}" >&2; exit 1 ;; \
+    esac
 
 # --- identity ----------------------------------------------------------------
 # The node image already ships a `node` user at 1000:1000. Rename it rather than
@@ -50,7 +61,13 @@ RUN set -eux; \
     groupmod -n claude node; \
     usermod -l claude -d /home/claude -m node; \
     mkdir -p /home/claude/.claude /home/claude/.cache /workspace; \
-    chown -R claude:claude /home/claude /workspace
+    chown -R claude:claude /home/claude /workspace; \
+    # Debian's skeleton .bash_logout runs `[ -x /usr/bin/clear_console ] && ...`,
+    # which fails in a container because that binary is not installed. A LOGIN
+    # shell runs it on the way out, so with `set -e` in the script the failure
+    # becomes the shell's exit status: `claude-sandbox --shell -- -c 'set -e;
+    # exit 5'` reported 1. It clears a console we do not have; delete it.
+    rm -f /home/claude/.bash_logout
 
 # --- hardening ----------------------------------------------------------------
 # Debian ships su, mount, passwd, chfn, gpasswd, ssh-keysign and friends setuid

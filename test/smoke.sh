@@ -44,6 +44,12 @@ run 'jq -e ".allowManagedPermissionRulesOnly // empty" /etc/claude-code/managed-
   || pass "project permission rules still apply"
 [ "$(run 'stat -c %a /usr/local/bin/sandbox-secret-guard')" = 555 ] \
   && pass "secret guard is not agent-writable" || fail "secret guard is writable"
+# Debian's skeleton .bash_logout runs a command that does not exist in a
+# container. A login shell runs it on exit, so under `set -e` its failure
+# becomes the shell's status and `--shell -- -c 'set -e; exit 5'` reported 1.
+run 'test -e /home/claude/.bash_logout' \
+  && fail "Debian .bash_logout is present; it clobbers the exit status of --shell scripts" \
+  || pass "no .bash_logout to clobber script exit codes"
 # A Write(path) deny rule is NOT matched by file permission checks. The CLI
 # warns at startup and the rule silently does nothing, so three rules here once
 # protected nothing at all. Edit(path) covers every file-editing tool.
