@@ -119,4 +119,30 @@ grep -q 'CONNECT api.anthropic.com' <<<"$log" \
 grep -qE '^127\.0\.0\.1 .*transaction-end-before-headers' <<<"$log" \
   && fail "healthcheck is logging every interval and burying the audit trail" \
   || pass "audit trail is free of recurring healthcheck noise"
+
+head_ "9. Scripted runs and the plugin install window"
+# Last, deliberately: opening and closing a window restarts the proxy, which
+# wipes the log that section 8 reads.
+PROXY_NAME=${PROXY_NAME:-claude-egress-proxy}
+"$ROOT/bin/claude-sandbox" --shell -- -c 'set -e; exit 7' >/dev/null 2>&1; rc=$?
+[ "$rc" = 7 ] && pass "--shell reports a script's own exit status" \
+  || fail "--shell reported $rc for a script that exited 7 (rebuild the image?)"
+
+if ! docker volume inspect "$AUTH_VOLUME" >/dev/null 2>&1; then
+  skip "no auth volume on this host, so plugins install cannot be exercised"
+else
+  # A repository that cannot be cloned: the install fails, and the window must
+  # still close. Nothing is written to the auth volume by a failed clone.
+  "$ROOT/bin/claude-sandbox" plugins install \
+    https://github.com/glockhart/no-such-repo-8f2a.git >/dev/null 2>&1; rc=$?
+  [ "$rc" -ne 0 ] && pass "a failed install exits nonzero" \
+    || fail "a failed install reported success"
+  [ "$(docker inspect "$PROXY_NAME" -f '{{len .Mounts}}' 2>/dev/null)" = 0 ] \
+    && pass "no temporary allowlist mount survives the command" \
+    || fail "the proxy still carries the window's allowlist mount"
+  out=$(sbx "curl -sS -o /dev/null --max-time 15 https://github.com 2>&1")
+  grep -q 'response 403' <<<"$out" \
+    && pass "github.com is denied again once the window is closed" \
+    || skip "github.com is allowed by the image's own allowlist, so this proves nothing"
+fi
 summary

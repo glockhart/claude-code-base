@@ -50,7 +50,13 @@ RUN set -eux; \
     groupmod -n claude node; \
     usermod -l claude -d /home/claude -m node; \
     mkdir -p /home/claude/.claude /home/claude/.cache /workspace; \
-    chown -R claude:claude /home/claude /workspace
+    chown -R claude:claude /home/claude /workspace; \
+    # Debian's skeleton .bash_logout runs `[ -x /usr/bin/clear_console ] && ...`,
+    # which fails in a container because that binary is not installed. A LOGIN
+    # shell runs it on the way out, so with `set -e` in the script the failure
+    # becomes the shell's exit status: `claude-sandbox --shell -- -c 'set -e;
+    # exit 5'` reported 1. It clears a console we do not have; delete it.
+    rm -f /home/claude/.bash_logout
 
 # --- hardening ----------------------------------------------------------------
 # Debian ships su, mount, passwd, chfn, gpasswd, ssh-keysign and friends setuid

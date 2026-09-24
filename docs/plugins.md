@@ -21,10 +21,46 @@ claude plugin install <name>@claude-plugins-official
 Verified end to end in the sandbox with `github.com` denied.
 
 **GitHub is only needed for third-party marketplaces** added straight from a
-repository, such as `claude plugin marketplace add owner/repo`. Those fail
-against the default allowlist, and the proxy log shows
-`CONNECT github.com:443 ... TCP_DENIED`. To allow them, uncomment the GitHub
-lines in `proxy/allowlist.optional.conf` and run `claude-sandbox proxy reload`.
+repository. Those fail against the default allowlist, and the proxy log shows
+`CONNECT github.com:443 ... TCP_DENIED`.
+
+## Installing one without leaving GitHub allowlisted
+
+```bash
+claude-sandbox plugins install https://github.com/owner/repo.git plugin-name
+```
+
+The hostname in that URL is allowlisted for exactly that command. It is
+bind-mounted over the empty `allowlist.local.conf` in the proxy image, the
+install runs, and the proxy comes back without the mount. Both ends remove the
+proxy container *before* anything that can fail, so an error, a Ctrl-C or a
+crash leaves you with no egress at all rather than an open hole. The command
+prints the hosts that were reached while the window was open, then re-checks
+that the host is denied again before it returns.
+
+Naming no plugin lists what the marketplace declares and installs nothing.
+
+Three details worth knowing:
+
+- **Use the full `https://….git` URL.** The `owner/repo` shorthand tries HTTPS,
+  then falls back to SSH, which can never work here: a CONNECT proxy speaks
+  HTTP, port 22 is not allowlisted, and DNS is sinkholed. The error it prints
+  talks about SSH keys, which sends you looking in the wrong place.
+- **Only the bare hostname is needed.** Measured on a real install: one
+  `CONNECT github.com:443`, plus npm, which is already allowed. Not
+  `codeload.github.com`, not `.githubusercontent.com`. The `.github.com`
+  wildcard would also grant `api.github.com`, `gist.github.com` and
+  `uploads.github.com`, which is what makes the warning in
+  `allowlist.optional.conf` real.
+- **A URL cannot be narrowed further.** The proxy matches the CONNECT hostname
+  and sees nothing else - not the path, not the repository. Scoping to one repo
+  would need TLS interception, and therefore a CA inside the container.
+
+To leave a forge permanently allowlisted instead, uncomment the lines in
+`proxy/allowlist.optional.conf`, then `make build-proxy` and
+`claude-sandbox proxy down && claude-sandbox proxy up`. The allowlists are baked
+into the image and the proxy's rootfs is read-only, so an edit in the checkout
+plus `proxy reload` does not reach the running proxy on its own.
 
 ## Moving plugins to another machine
 

@@ -11,8 +11,17 @@ This is a real finding, not a false alarm: do not work around it.
 
 **Something hangs instead of failing**
 Almost always a blocked host. `claude-sandbox proxy logs` and look for
-`TCP_DENIED/403`. Add the host to `proxy/allowlist.local.conf`, then
-`claude-sandbox proxy reload`.
+`TCP_DENIED/403`. Add the host to `proxy/allowlist.optional.conf` or
+`proxy/allowlist.local.conf`, then `make build-proxy` and
+`claude-sandbox proxy down && claude-sandbox proxy up`.
+
+The allowlists are baked into the proxy image and its rootfs is read-only, so
+editing a file in the checkout and running `proxy reload` on its own changes
+nothing: the running proxy never sees that file. `reload` applies changes to
+what the container already has, which is why it is still worth having.
+
+For a one-off install from a forge, `claude-sandbox plugins install` opens that
+one host for that one command and closes it again, with no rebuild.
 
 **`npm install` or `pip install` fails with no route**
 The tool is ignoring the proxy environment variables. That is the correct

@@ -6,6 +6,7 @@
 # Usage:
 #   claude-sandbox [flags] [-- claude args...]
 #   claude-sandbox proxy up|down|logs|reload
+#   claude-sandbox plugins install URL [plugin...]
 #   claude-sandbox plugins export [FILE] | plugins import FILE | plugins list
 #   claude-sandbox pull | config
 #   claude-sandbox login | logout | doctor
@@ -54,6 +55,7 @@ load_config() {
 }
 
 ROOT=${CLAUDE_SANDBOX_ROOT:-$(resolve_root)}
+SELF=${BASH_SOURCE[0]}          # `plugins install` re-enters the launcher
 load_config "$HOME/.config/claude-sandbox/config"
 load_config "$ROOT/versions.env"
 
@@ -71,6 +73,10 @@ load_config "$ROOT/versions.env"
 : "${PROXY_SUBNET:=10.99.0.0/24}"
 : "${PROXY_GATEWAY:=10.99.0.1}"
 : "${AUTH_VOLUME:=claude-sandbox-auth}"
+
+# Set only by `plugins install`, for the life of one command. Everything else
+# runs with the allowlist baked into the proxy image.
+PROXY_EXTRA_ALLOWLIST=${PROXY_EXTRA_ALLOWLIST:-}
 
 die()  { printf '\033[31mclaude-sandbox:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[2m[sandbox]\033[0m %s\n' "$*" >&2; }
@@ -118,11 +124,20 @@ proxy_up() {
     || docker network create --internal --subnet "$PROXY_SUBNET" --gateway "$PROXY_GATEWAY" \
          "$NET_ISOLATED" >/dev/null
 
+  # The image ships an empty allowlist.local.conf precisely so a bind mount can
+  # replace it without a rebuild. Nothing else writes there: the rootfs is
+  # read-only, so the file cannot be edited in place even by root.
+  local allow=()
+  if [ -n "$PROXY_EXTRA_ALLOWLIST" ]; then
+    allow=(-v "$PROXY_EXTRA_ALLOWLIST:/etc/squid/allowlist.local.conf:ro")
+  fi
+
   if [ -n "$(docker ps -aq -f "name=^${PROXY_NAME}$")" ]; then
     docker start "$PROXY_NAME" >/dev/null 2>&1 || true
   else
     docker run -d --name "$PROXY_NAME" \
       --network "$NET_EXTERNAL" \
+      ${allow[@]+"${allow[@]}"} \
       --user proxy --init --restart unless-stopped \
       --cap-drop ALL --security-opt no-new-privileges:true \
       --read-only \
@@ -142,6 +157,42 @@ proxy_up() {
     sleep 1; waited=$((waited + 1))
   done
   die "proxy did not become healthy; see: claude-sandbox proxy logs"
+}
+
+# ---------------------------------------------------------------- window ----
+# `plugins install` opens egress to one host for one command. The window is a
+# bind mount over the empty allowlist file in the image, so there is no config
+# to edit and nothing to leave behind: closing it is a restart without the
+# mount. Both halves remove the container BEFORE anything that can fail, which
+# is what makes it fail closed - with no proxy there is no egress at all, so a
+# crash or a Ctrl-C mid-way leaves the sandbox more restricted than it found it,
+# never less.
+WINDOW_FILE='' WINDOW_OPEN=0
+
+window_open() {
+  local host=$1
+  WINDOW_FILE=$(mktemp "${TMPDIR:-/tmp}/claude-sandbox-allow.XXXXXX") \
+    || die "could not write a temporary allowlist"
+  printf '%s\n' "$host" >"$WINDOW_FILE"
+  chmod 0644 "$WINDOW_FILE"           # squid reads it as uid 13
+  trap window_close EXIT              # armed before the hole exists, not after
+  trap 'window_close; exit 130' INT TERM
+  WINDOW_OPEN=1
+  docker rm -f "$PROXY_NAME" >/dev/null 2>&1 || true
+  PROXY_EXTRA_ALLOWLIST=$WINDOW_FILE
+  proxy_up
+  warn "egress window OPEN for $host; it closes when this command exits"
+}
+
+window_close() {
+  trap - EXIT INT TERM
+  [ "$WINDOW_OPEN" = 1 ] || return 0
+  WINDOW_OPEN=0
+  docker rm -f "$PROXY_NAME" >/dev/null 2>&1 || true   # the hole shuts here
+  PROXY_EXTRA_ALLOWLIST=''
+  rm -f "$WINDOW_FILE"; WINDOW_FILE=''
+  proxy_up                                             # back to the baked allowlist
+  info "egress window closed"
 }
 
 cmd_doctor() {
@@ -205,6 +256,99 @@ cmd_plugins_list() {
     echo "marketplaces:"
     jq -r "keys[]?" /v/plugins/known_marketplaces.json 2>/dev/null \
       | sed "s/^/  /" | grep . || echo "  (none)"'
+}
+
+# Runs inside the sandbox, with the window open. Arguments rather than
+# interpolation: nothing here is assembled from a URL by the shell.
+read -r -d '' PLUGIN_INSTALL_SCRIPT <<'SCRIPT' || true
+set -euo pipefail
+# Images built before .bash_logout was dropped lose an explicit exit status
+# under `set -e`, so every exit here goes through this.
+finish() { set +e; exit "$1"; }
+url=$1; shift
+cfg=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+claude plugin marketplace add "$url"
+# The marketplace names itself in its own manifest, so read back which one this
+# URL became rather than guessing it from the repository name.
+mkt=$(jq -r --arg u "$url" '
+        to_entries[] | select((.value.source.url // .value.url // "") == $u) | .key
+      ' "$cfg/plugins/known_marketplaces.json" 2>/dev/null | head -1) || true
+[ -n "$mkt" ] || { echo "could not tell which marketplace $url became" >&2; finish 4; }
+echo "marketplace: $mkt"
+manifest=$cfg/plugins/marketplaces/$mkt/.claude-plugin/marketplace.json
+if [ $# -eq 0 ]; then
+  echo "no plugin named, so nothing was installed. This marketplace declares:"
+  if [ -f "$manifest" ]; then
+    jq -r '.plugins[]? | if type == "string" then . else .name end' "$manifest" | sed 's/^/  /' || true
+  else
+    echo "  (no manifest at $manifest)"
+  fi
+  echo "re-run naming the ones you want."
+  finish 0
+fi
+for p in "$@"; do
+  case $p in *@*) ;; *) p=$p@$mkt ;; esac
+  echo "installing $p"
+  claude plugin install "$p"
+done
+claude plugin list
+finish 0
+SCRIPT
+
+cmd_plugins_install() {
+  local url=${1-}; [ $# -gt 0 ] && shift
+  [ -n "$url" ] || die "usage: claude-sandbox plugins install <https-url> [plugin...]"
+  case $url in
+    https://*) ;;
+    git@*|ssh://*)
+      die "ssh remotes cannot work here: the proxy speaks CONNECT over HTTP, port 22
+  is not allowlisted, and DNS is sinkholed. Use the https URL for the same repo." ;;
+    *) die "expected an https URL, got: $url" ;;
+  esac
+  # Only the host is ever allowlisted. A CONNECT proxy cannot see the path, so
+  # the rest of the URL buys no narrowing - it only decides what gets cloned.
+  local host=${url#https://}; host=${host%%/*}; host=${host%%[:?]*}
+  [ -n "$host" ] || die "no hostname in $url"
+
+  plugins_volume_or_die
+  ensure_image "$IMAGE_TOOLS"
+
+  # Both ends of the window restart the proxy, which would pull egress out from
+  # under any run already in flight.
+  local busy
+  busy=$(docker ps --format '{{.Names}}' | grep '^claude-sandbox-' | tr '\n' ' ') || true
+  [ -z "$busy" ] || die "a sandbox is running ($busy). Stop it and retry."
+
+  window_open "$host"
+  local rc=0
+  "$SELF" --shell -- -c "$PLUGIN_INSTALL_SCRIPT" plugins-install "$url" ${@+"$@"} || rc=$?
+
+  # The proxy container is new, so its whole log is this window and nothing else.
+  info "hosts reached while the window was open:"
+  docker logs "$PROXY_NAME" 2>&1 | grep '"CONNECT' \
+    | awk '{print $9, $7}' | sort | uniq -c | sort -rn | sed 's/^/  /' || true
+
+  window_close
+
+  # Do not take the close on trust: ask the proxy, the way verify.sh does.
+  local probe
+  probe=$(docker run --rm --network "$NET_ISOLATED" --dns "$PROXY_IP" \
+    --cap-drop ALL --security-opt no-new-privileges:true --user 1000:1000 \
+    -e "HTTPS_PROXY=http://$PROXY_IP:$PROXY_PORT" -e SANDBOX_EXPECT_PROXY=0 \
+    --entrypoint bash "$IMAGE_TOOLS" \
+    -c "curl -sS -o /dev/null --max-time 15 https://$host" 2>&1 || true)
+  if grep -q 'response 403' <<<"$probe"; then
+    info "confirmed: $host is denied again"
+  else
+    warn "$host still answers with the window closed, so it is in the image's own
+  allowlist (proxy/allowlist*.conf), not the temporary one."
+  fi
+
+  [ "$rc" -eq 0 ] || die "install failed (exit $rc). The egress window is closed."
+  # With no plugin named the run only listed what the marketplace offers.
+  if [ $# -gt 0 ]; then
+    info "installed. Plugins live in $AUTH_VOLUME and survive --rm and rebuilds."
+  fi
 }
 
 cmd_plugins_export() {
@@ -288,15 +432,16 @@ case ${1-} in
   plugins) shift
     sub=${1-}; [ $# -gt 0 ] && shift
     case $sub in
-      export) cmd_plugins_export "$@"; exit 0 ;;
-      import) cmd_plugins_import "$@"; exit 0 ;;
-      list)   cmd_plugins_list "$@";   exit 0 ;;
-      *)      die "plugins: expected export, import or list" ;;
+      install) cmd_plugins_install "$@"; exit 0 ;;
+      export)  cmd_plugins_export "$@";  exit 0 ;;
+      import)  cmd_plugins_import "$@";  exit 0 ;;
+      list)    cmd_plugins_list "$@";    exit 0 ;;
+      *)       die "plugins: expected install, export, import or list" ;;
     esac ;;
   logout) docker volume rm -f "$AUTH_VOLUME" >/dev/null && info "auth volume removed"; exit 0 ;;
   doctor) shift; cmd_doctor; exit $? ;;
   login)  shift; set -- --login "$@" ;;
-  -h|--help) sed -n '2,21p' "$0" | grep -v 'shellcheck' | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,22p' "$0" | grep -v 'shellcheck' | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 # ----------------------------------------------------------------- flags ----
