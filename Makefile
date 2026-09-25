@@ -67,10 +67,18 @@ verify: ## Full verification checklist (needs the proxy running)
 
 test: smoke verify ## Everything
 
-bump-claude: ## Pin a new agent version: make bump-claude VERSION=2.2.0
-	@test -n "$(VERSION)" || { echo "usage: make bump-claude VERSION=x.y.z"; exit 1; }
-	sed -i.bak 's/^CLAUDE_CODE_VERSION=.*/CLAUDE_CODE_VERSION=$(VERSION)/' versions.env && rm -f versions.env.bak
-	@echo "pinned $(VERSION); now run: make build"
+CHANNEL ?= latest
+
+# Resolves CHANNEL (an npm dist-tag: latest, stable, next) to an exact version
+# unless VERSION is given, then pins it in versions.env and the launcher default.
+bump-claude: ## Pin the agent: make bump-claude [VERSION=x.y.z | CHANNEL=stable]
+	@v="$(VERSION)"; \
+	[ -n "$$v" ] || v=$$(npm view "@anthropic-ai/claude-code@$(CHANNEL)" version); \
+	[[ $$v =~ ^[0-9]+\.[0-9]+\.[0-9]+$$ ]] || { echo "bad version '$$v'" >&2; exit 1; }; \
+	sed -i.bak "s/^CLAUDE_CODE_VERSION=.*/CLAUDE_CODE_VERSION=$$v/" versions.env && rm -f versions.env.bak; \
+	sed -i.bak "s/CLAUDE_CODE_VERSION:=[0-9.]*}/CLAUDE_CODE_VERSION:=$$v}/" bin/claude-sandbox && rm -f bin/claude-sandbox.bak; \
+	grep -q "CLAUDE_CODE_VERSION:=$$v}" bin/claude-sandbox || { echo "launcher default not updated" >&2; exit 1; }; \
+	echo "pinned $$v (was $(CLAUDE_CODE_VERSION)); now run: make build"
 
 prune-projects: ## Remove per-project images not built on the current base
 	@docker images --format '{{.Repository}}:{{.Tag}}' \
