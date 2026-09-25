@@ -143,11 +143,15 @@ each other from the 10 GB repository cache.
 ## Bumping the agent version
 
 ```bash
-make bump-claude VERSION=2.2.0   # edits versions.env
+make bump-claude                  # newest release (npm dist-tag "latest")
+make bump-claude CHANNEL=stable   # the more conservative "stable" tag
+make bump-claude VERSION=2.2.0    # an exact version
 ```
 
-Then update the matching built-in default in `bin/claude-sandbox`. `make smoke`
-fails if the two drift, and `claude-sandbox config` prints what a machine
-actually resolved, which is the quickest way to compare two hosts.
+A channel is resolved to an exact version at bump time; the pin itself is
+always x.y.z. The target edits both `versions.env` and the matching built-in
+default in `bin/claude-sandbox`. `make smoke` fails if the two drift, and
+`claude-sandbox config` prints what a machine actually resolved, which is the
+quickest way to compare two hosts.
 
 Merge to main and CI publishes the new version.
