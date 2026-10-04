@@ -652,6 +652,14 @@ fi
 
 TTY=(-i); [ -t 0 ] && [ -t 1 ] && TTY=(-it)
 
+# The host identity, only where there is one. An empty GIT_AUTHOR_NAME outranks
+# every config source, so passing it blank made commits inside fail outright
+# for anyone without a global identity, -c user.name included.
+GIT_ID=()
+name=$(git config --get user.name || true); email=$(git config --get user.email || true)
+if [ -n "$name" ]; then GIT_ID+=(-e "GIT_AUTHOR_NAME=$name" -e "GIT_COMMITTER_NAME=$name"); fi
+if [ -n "$email" ]; then GIT_ID+=(-e "GIT_AUTHOR_EMAIL=$email" -e "GIT_COMMITTER_EMAIL=$email"); fi
+
 # Not exec: the launcher must outlive the container to check the git dir. A
 # trapped INT keeps a Ctrl-C (which docker forwards to the agent) from skipping
 # the check.
@@ -672,10 +680,7 @@ docker run --rm "${TTY[@]}" \
   --tmpfs "/home/claude/.claude/ide:rw,nosuid,nodev,size=1m,mode=0700,uid=${RUN_UID},gid=${RUN_GID}" \
   -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
   -e "TERM=${TERM:-xterm-256color}" \
-  -e "GIT_AUTHOR_NAME=$(git config --get user.name || echo '')" \
-  -e "GIT_AUTHOR_EMAIL=$(git config --get user.email || echo '')" \
-  -e "GIT_COMMITTER_NAME=$(git config --get user.name || echo '')" \
-  -e "GIT_COMMITTER_EMAIL=$(git config --get user.email || echo '')" \
+  ${GIT_ID[@]+"${GIT_ID[@]}"} \
   "${ENV_ARGS[@]}" "${MOUNTS[@]}" \
   -w "$WORKDIR" \
   "$IMAGE" "${CMD[@]}"

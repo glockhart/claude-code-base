@@ -146,7 +146,8 @@ head_ "9. The agent cannot poison host git"
 gt=$(mktemp -d); repo=$gt/poison; mkdir -p "$repo"
 git -C "$repo" init -q
 git -C "$repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m host
-box() { (cd "$repo" && "$SBX" --offline --shell -- -c "$1") >/dev/null 2>&1; }
+# Output is kept so a failure can show what the container said.
+box() { BOX_OUT=$(cd "$repo" && "$SBX" --offline --shell -- -c "$1" 2>&1); }
 cfg=$(cat "$repo/.git/config")
 # mktemp on macOS is under /var, a symlink to /private/var. The launcher once
 # mixed resolved and unresolved paths there and started the agent in a
@@ -161,6 +162,7 @@ if box 'git -c user.name=t -c user.email=t@t commit -q --allow-empty -m inside' 
   pass "commits from inside still land on the host"
 else
   fail "could not commit from inside; the checks below prove nothing"
+  while IFS= read -r l; do printf '        | %s\n' "$l"; done <<<"$BOX_OUT"
 fi
 box 'git config core.hooksPath .githooks'
 [ -z "$(git -C "$repo" config --local --get core.hooksPath)" ] \
