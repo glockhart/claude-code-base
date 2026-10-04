@@ -62,12 +62,51 @@ your machine or in CI with real credentials. Vectors include git hooks, package
 scripts and `postinstall`, Makefiles, editor tasks, devcontainer files, workflow
 files, and a lockfile pointing at a new registry.
 
-Partly mitigated: the `PreToolUse` guard and the deny rules cover git hooks,
-workflow files and devcontainer files. As host-side belt and braces:
+Git metadata is the sharpest case, because host git runs it without you doing
+anything. A hook runs at your next commit, and `core.fsmonitor` in
+`.git/config` runs on every `git status`, which VS Code issues continuously, so
+it fires mid-session, before any review. `core.pager`, `core.editor`,
+`core.sshCommand`, `diff.external` and filter drivers run commands too.
+
+The launcher bind-mounts `.git/config`, `.git/hooks` and `.git/commondir`
+read-only over the writable workspace. Commits from inside still work, since
+they write objects, refs and the index, never config. `commondir` matters
+because git honours it in any git dir, not only linked worktrees, and reads
+config and hooks from wherever it points. The launcher writes it once as `.`,
+a no-op, and leaves it there. Recreating it per session made Docker Desktop
+mount a stale, deleted copy.
+
+When the session ends the launcher compares a hash of every config, commondir,
+gitdir and hook file under `.git`, including submodule git dirs. If anything
+changed it prints the files and exits 3. `make smoke` checks the bypasses and
+the check.
+
+Not covered: a project whose `.git` is a file (a linked worktree or
+submodule) gets the post-run check but no read-only pins. Nor are new
+repositories planted inside the working tree covered: a nested `sub/.git`, or a
+bare repo, carries its own config, and VS Code's repository detection will run
+git in it. On the host, `safe.bareRepository=explicit` closes the bare-repo
+form.
+
+The `PreToolUse` guard and the deny rules also refuse the literal paths: git
+hooks, workflow files and devcontainer files. Treat that as an early, readable
+refusal, not the control. `git config core.hooksPath x` never names a hooks
+path and passes straight through.
+
+Do not rely on `git config --global core.hooksPath` as a host-side backstop.
+Repo-local config overrides global config, so one `git config core.hooksPath`
+inside the repo undoes it. Only command-line scope outranks the repo, which
+includes the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+variables:
 
 ```bash
-git config --global core.hooksPath ~/.git-hooks   # ignore repo-local hooks
+# In your shell profile. Repo config cannot override these.
+export GIT_CONFIG_COUNT=2
+export GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0="$HOME/.git-hooks"
+export GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false
 ```
+
+This protects only processes that inherit your shell environment.
 
 **The shell path is best-effort.** A tool call names its file, so the hook and
 the deny rules see it exactly. A shell command does not: `cd .github/workflows`
