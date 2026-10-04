@@ -139,4 +139,58 @@ sa_reg=$(CLAUDE_SANDBOX_ROOT="$sa" "$sa/claude-sandbox" config 2>/dev/null | sed
   && pass "built-in default REGISTRY matches versions.env (${REGISTRY:-empty})" \
   || fail "built-in REGISTRY '$sa_reg' has drifted from versions.env '$REGISTRY'"
 rm -rf "$sa"
+head_ "9. The agent cannot poison host git"
+# Each of these got past the PreToolUse guard, which only matches literal
+# paths. They must fail because .git/config, commondir and hooks are mounted
+# read-only, not because of anything the agent chooses to do.
+gt=$(mktemp -d); repo=$gt/poison; mkdir -p "$repo"
+git -C "$repo" init -q
+git -C "$repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m host
+# Output is kept so a failure can show what the container said.
+box() { BOX_OUT=$(cd "$repo" && "$SBX" --offline --shell -- -c "$1" 2>&1); }
+cfg=$(cat "$repo/.git/config")
+# mktemp on macOS is under /var, a symlink to /private/var. The launcher once
+# mixed resolved and unresolved paths there and started the agent in a
+# /workspace/poison/var/folders/... tree it had created inside the repo.
+wd=$(cd "$repo" && "$SBX" --offline --shell -- -c pwd 2>/dev/null | tr -d '\r')
+[ "$wd" = /workspace/poison ] && [ ! -e "$repo/var" ] \
+  && pass "a symlinked project path maps to the workspace root" \
+  || fail "agent started in '$wd', not /workspace/poison"
+# Positive control first, or every "unchanged" below could be a launch failure.
+if box 'git -c user.name=t -c user.email=t@t commit -q --allow-empty -m inside' \
+   && [ "$(git -C "$repo" rev-list --count HEAD)" = 2 ]; then
+  pass "commits from inside still land on the host"
+else
+  fail "could not commit from inside; the checks below prove nothing"
+  while IFS= read -r l; do printf '        | %s\n' "$l"; done <<<"$BOX_OUT"
+fi
+box 'git config core.hooksPath .githooks'
+[ -z "$(git -C "$repo" config --local --get core.hooksPath)" ] \
+  && pass "git config core.hooksPath cannot redirect host hooks" || fail "core.hooksPath was set in the host repo"
+box 'git config core.fsmonitor ./x.sh'
+[ -z "$(git -C "$repo" config --local --get core.fsmonitor)" ] \
+  && pass "git config core.fsmonitor cannot reach the host" || fail "core.fsmonitor was set in the host repo"
+box 'cd .git && printf "[core]\n\tpager = x\n" >> config'
+[ "$(cat "$repo/.git/config")" = "$cfg" ] \
+  && pass "a shell write into .git/config does not land" || fail ".git/config was modified from inside"
+box 'printf "#!/bin/sh\n" > .git/hooks/post-commit; chmod +x .git/hooks/post-commit'
+[ ! -e "$repo/.git/hooks/post-commit" ] \
+  && pass "a hook cannot be planted from inside" || fail "a post-commit hook was planted"
+# commondir points git's config and hooks lookup anywhere, in any git dir.
+box 'mkdir -p ../evil; echo ../../evil > .git/commondir'
+[ "$(cat "$repo/.git/commondir")" = . ] && git -C "$repo" status >/dev/null 2>&1 \
+  && pass "commondir cannot redirect host git" \
+  || fail ".git/commondir now reads: $(cat "$repo/.git/commondir")"
+# The post-run check: a change it did not make itself must still be reported.
+# The host does the tampering mid-session, since the agent can no longer.
+# shellcheck disable=SC2016  # expands in the container's shell, not here
+(cd "$repo" && "$SBX" --offline --shell -- -c \
+  'touch .started; for _ in $(seq 100); do [ -e .go ] && exit 0; sleep 0.1; done; exit 9') >/dev/null 2>&1 &
+pid=$!
+for _ in $(seq 100); do [ -e "$repo/.started" ] && break; sleep 0.1; done
+git -C "$repo" config core.pager tampered; touch "$repo/.go"
+wait "$pid"; st=$?
+[ "$st" = 3 ] && pass "a git config change during the session exits 3" \
+  || fail "tampering was not reported (exit $st)"
+rm -rf "$gt"
 summary

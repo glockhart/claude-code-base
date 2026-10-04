@@ -472,7 +472,10 @@ if git rev-parse --show-toplevel >/dev/null 2>&1; then
 fi
 PROJECT_DIR=$(cd "$PROJECT_DIR" && pwd -P)
 PROJECT=$(basename "$PROJECT_DIR")
-REL=${PWD#"$PROJECT_DIR"}; REL=${REL#/}
+# Both sides physical. Strip a resolved PROJECT_DIR from a logical $PWD and a
+# symlinked path (macOS /var -> /private/var) leaves the whole path as REL, and
+# docker run -w then creates that tree inside the repo.
+REL=$(pwd -P); REL=${REL#"$PROJECT_DIR"}; REL=${REL#/}
 
 # The workspace goes to /workspace/<project>, never a bare /workspace. Session
 # transcripts are keyed by working directory, so a shared path would merge every
@@ -585,6 +588,56 @@ MOUNTS+=(
 )
 for f in ${ENV_FILES[@]+"${ENV_FILES[@]}"}; do MOUNTS+=(--env-file "$f"); done
 
+# --------------------------------------------------------------- git dir ----
+# A writable .git lets the agent plant code that runs on the HOST: a hook, or a
+# core.fsmonitor, core.pager or filter driver in config. fsmonitor fires on any
+# `git status`, which VS Code runs continuously, so it would not wait for your
+# review. The guard only sees literal paths (`git config core.hooksPath x` gets
+# past it), and a repo's own config overrides --global. So pin these read-only.
+# Commits still work: they write objects, refs and the index, never config.
+GITDIR=$PROJECT_DIR/.git
+if [ -d "$GITDIR" ] && [ ! -L "$GITDIR" ]; then
+  [ -f "$GITDIR/config" ] || die "$GITDIR has no config file; refusing to run against it"
+  mkdir -p "$GITDIR/hooks"
+  # git honours a commondir file in ANY git dir, not just linked worktrees, and
+  # reads config and hooks from wherever it points. "." is a no-op that occupies
+  # the name; the read-only mount stops it being replaced. It stays after exit:
+  # deleting and recreating it between sessions left Docker Desktop's virtiofs
+  # mounting the stale, deleted file, so git inside died reading it.
+  [ -e "$GITDIR/commondir" ] || printf '.\n' >"$GITDIR/commondir"
+  [ "$(cat "$GITDIR/commondir" 2>/dev/null)" = . ] \
+    || die "$GITDIR/commondir exists and redirects git elsewhere; inspect it before running"
+  MOUNTS+=(
+    -v "$GITDIR/config:$WORKSPACE/.git/config:ro"
+    -v "$GITDIR/commondir:$WORKSPACE/.git/commondir:ro"
+    -v "$GITDIR/hooks:$WORKSPACE/.git/hooks:ro"
+  )
+  # config.worktree is read only when the extension is on, and the extension
+  # lives in the config pinned above. Pin the file too when it is in play.
+  if [ "$(git config --file "$GITDIR/config" --type=bool --get extensions.worktreeConfig 2>/dev/null)" = true ]; then
+    [ -e "$GITDIR/config.worktree" ] || : >"$GITDIR/config.worktree"
+    MOUNTS+=(-v "$GITDIR/config.worktree:$WORKSPACE/.git/config.worktree:ro")
+  fi
+elif [ -e "$GITDIR" ]; then
+  warn "$PROJECT_DIR/.git is not a plain directory (worktree or submodule?), so its"
+  warn "  config and hooks are not pinned read-only. Only the post-run check applies."
+fi
+
+# Everything in the git dir that decides what host git executes, hashed, so a
+# change the pins above missed (submodule git dirs, linked worktrees) still
+# surfaces when the session ends. refs and logs are skipped: a branch called
+# hooks/x would otherwise look like tampering.
+git_fingerprint() {
+  [ -d "$GITDIR" ] || return 0
+  (cd "$GITDIR" && find . \( -name objects -o -name refs -o -name logs \) -prune -o \
+     \( -type f -o -type l \) \( -name config -o -name config.worktree -o -name commondir \
+     -o -name gitdir -o -path '*/hooks/*' \) -print \
+   | LC_ALL=C sort | while IFS= read -r f; do
+       printf '%s  %s\n' "$(sha <"$f" 2>/dev/null | cut -c1-16)" "$f"
+     done)
+}
+
+
 # ------------------------------------------------------------------- run ----
 if [ "$SHELL_MODE" = 1 ]; then
   # Pass arguments through so `--shell -- -c '...'` is scriptable, not just
@@ -599,7 +652,21 @@ fi
 
 TTY=(-i); [ -t 0 ] && [ -t 1 ] && TTY=(-it)
 
-exec docker run --rm "${TTY[@]}" \
+# The host identity, only where there is one. An empty GIT_AUTHOR_NAME outranks
+# every config source, so passing it blank made commits inside fail outright
+# for anyone without a global identity, -c user.name included.
+GIT_ID=()
+name=$(git config --get user.name || true); email=$(git config --get user.email || true)
+if [ -n "$name" ]; then GIT_ID+=(-e "GIT_AUTHOR_NAME=$name" -e "GIT_COMMITTER_NAME=$name"); fi
+if [ -n "$email" ]; then GIT_ID+=(-e "GIT_AUTHOR_EMAIL=$email" -e "GIT_COMMITTER_EMAIL=$email"); fi
+
+# Not exec: the launcher must outlive the container to check the git dir. A
+# trapped INT keeps a Ctrl-C (which docker forwards to the agent) from skipping
+# the check.
+GIT_BEFORE=$(git_fingerprint)
+trap : INT
+set +e
+docker run --rm "${TTY[@]}" \
   --name "claude-sandbox-${PROJECT}-$$" \
   --hostname "$PROJECT" \
   --network "$NETWORK" \
@@ -613,10 +680,22 @@ exec docker run --rm "${TTY[@]}" \
   --tmpfs "/home/claude/.claude/ide:rw,nosuid,nodev,size=1m,mode=0700,uid=${RUN_UID},gid=${RUN_GID}" \
   -e CLAUDE_CONFIG_DIR=/home/claude/.claude \
   -e "TERM=${TERM:-xterm-256color}" \
-  -e "GIT_AUTHOR_NAME=$(git config --get user.name || echo '')" \
-  -e "GIT_AUTHOR_EMAIL=$(git config --get user.email || echo '')" \
-  -e "GIT_COMMITTER_NAME=$(git config --get user.name || echo '')" \
-  -e "GIT_COMMITTER_EMAIL=$(git config --get user.email || echo '')" \
+  ${GIT_ID[@]+"${GIT_ID[@]}"} \
   "${ENV_ARGS[@]}" "${MOUNTS[@]}" \
   -w "$WORKDIR" \
   "$IMAGE" "${CMD[@]}"
+status=$?
+set -e
+trap - INT
+
+GIT_AFTER=$(git_fingerprint)
+if [ "$GIT_BEFORE" != "$GIT_AFTER" ]; then
+  printf '\n\033[41;97m claude-sandbox: GIT METADATA CHANGED DURING THIS SESSION \033[0m\n' >&2
+  warn "Files that decide what git executes on this machine were modified:"
+  diff <(printf '%s\n' "$GIT_BEFORE") <(printf '%s\n' "$GIT_AFTER") | grep '^[<>]' \
+    | sed 's/^</  was:/; s/^>/  now:/' >&2 || true
+  warn "Do not run git in $PROJECT_DIR until you have read these files."
+  warn "Treat any hook, fsmonitor, pager, editor or filter setting you did not add as hostile."
+  [ "$status" -ne 0 ] || status=3
+fi
+exit "$status"
