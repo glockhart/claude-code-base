@@ -65,6 +65,13 @@ head_ "4. The agent runs"
 v=$(docker run --rm --entrypoint claude "$IMG" --version 2>/dev/null | head -1)
 grep -q "$CLAUDE_CODE_VERSION" <<<"$v" && pass "agent reports $v" || fail "version mismatch: got '$v', want $CLAUDE_CODE_VERSION"
 
+p=$(run 'impeccable engine-probe')
+grep -q '^impeccable-engine' <<<"$p" && pass "impeccable engine is on PATH ($p)" \
+  || fail "impeccable engine missing or broken: '$p'"
+grep -q "^ARG IMPECCABLE_ENGINE_VERSION=$IMPECCABLE_ENGINE_VERSION\$" "$ROOT/base/Dockerfile" \
+  && pass "Dockerfile impeccable default matches versions.env ($IMPECCABLE_ENGINE_VERSION)" \
+  || fail "Dockerfile IMPECCABLE_ENGINE_VERSION default has drifted from versions.env"
+
 head_ "5. Secret guard blocks what it should"
 guard() { docker run --rm -i --entrypoint /usr/local/bin/sandbox-secret-guard "$IMG" <<<"$1" >/dev/null 2>&1; echo $?; }
 [ "$(guard '{"tool_name":"Write","tool_input":{"file_path":"/workspace/p/.git/hooks/pre-commit"}}')" = 2 ] \

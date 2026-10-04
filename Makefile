@@ -16,6 +16,7 @@ build: build-proxy ## Build both images for this machine's native arch
 	docker build \
 	  --build-arg CLAUDE_CODE_VERSION=$(CLAUDE_CODE_VERSION) \
 	  --build-arg NODE_IMAGE=$(NODE_IMAGE) \
+	  --build-arg IMPECCABLE_ENGINE_VERSION=$(IMPECCABLE_ENGINE_VERSION) \
 	  -t $(IMAGE) -t $(BASE_IMAGE_NAME):latest base
 
 build-proxy: ## Build the egress proxy image
