@@ -6,7 +6,7 @@
 # Usage:
 #   claude-sandbox [flags] [-- claude args...]
 #   claude-sandbox proxy up|down|logs|reload
-#   claude-sandbox plugins install URL [plugin...]
+#   claude-sandbox plugins install URL|owner/repo [plugin...]
 #   claude-sandbox plugins export [FILE] | plugins import FILE | plugins list
 #   claude-sandbox pull | config
 #   claude-sandbox login | logout | doctor
@@ -60,7 +60,7 @@ load_config "$HOME/.config/claude-sandbox/config"
 load_config "$ROOT/versions.env"
 
 # Built-in defaults. These are what make the script standalone.
-: "${CLAUDE_CODE_VERSION:=2.1.278}"
+: "${CLAUDE_CODE_VERSION:=2.1.282}"
 : "${BASE_IMAGE_NAME:=claude-code-base}"
 : "${PROXY_IMAGE_NAME:=claude-sandbox-proxy}"
 : "${PROXY_IMAGE_TAG:=1}"
@@ -297,13 +297,19 @@ SCRIPT
 
 cmd_plugins_install() {
   local url=${1-}; [ $# -gt 0 ] && shift
-  [ -n "$url" ] || die "usage: claude-sandbox plugins install <https-url> [plugin...]"
+  [ -n "$url" ] || die "usage: claude-sandbox plugins install <https-url|owner/repo> [plugin...]"
+  # GitHub shorthand is expanded here rather than handed to claude, whose own
+  # expansion falls back to SSH - which can never get out through the proxy.
+  if [[ $url =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]]; then
+    url=https://github.com/${url%.git}.git
+    info "marketplace: $url"
+  fi
   case $url in
     https://*) ;;
     git@*|ssh://*)
       die "ssh remotes cannot work here: the proxy speaks CONNECT over HTTP, port 22
   is not allowlisted, and DNS is sinkholed. Use the https URL for the same repo." ;;
-    *) die "expected an https URL, got: $url" ;;
+    *) die "expected an https URL or GitHub owner/repo, got: $url" ;;
   esac
   # Only the host is ever allowlisted. A CONNECT proxy cannot see the path, so
   # the rest of the URL buys no narrowing - it only decides what gets cloned.

@@ -28,6 +28,7 @@ repository. Those fail against the default allowlist, and the proxy log shows
 
 ```bash
 claude-sandbox plugins install https://github.com/owner/repo.git plugin-name
+claude-sandbox plugins install owner/repo plugin-name   # same thing, for GitHub
 ```
 
 The hostname in that URL is allowlisted for exactly that command. It is
@@ -42,10 +43,13 @@ Naming no plugin lists what the marketplace declares and installs nothing.
 
 Three details worth knowing:
 
-- **Use the full `https://….git` URL.** The `owner/repo` shorthand tries HTTPS,
-  then falls back to SSH, which can never work here: a CONNECT proxy speaks
-  HTTP, port 22 is not allowlisted, and DNS is sinkholed. The error it prints
-  talks about SSH keys, which sends you looking in the wrong place.
+- **`owner/repo` is expanded by the launcher, not by claude.** It becomes
+  `https://github.com/owner/repo.git` before claude sees it. Claude's own
+  shorthand tries HTTPS, then falls back to SSH, which can never work here: a
+  CONNECT proxy speaks HTTP, port 22 is not allowlisted, and DNS is sinkholed.
+  The error it prints talks about SSH keys, which sends you looking in the
+  wrong place. So inside the sandbox, `claude plugin marketplace add` still
+  wants the full URL.
 - **Only the bare hostname is needed.** Measured on a real install: one
   `CONNECT github.com:443`, plus npm, which is already allowed. Not
   `codeload.github.com`, not `.githubusercontent.com`. The `.github.com`
@@ -61,6 +65,22 @@ To leave a forge permanently allowlisted instead, uncomment the lines in
 `claude-sandbox proxy down && claude-sandbox proxy up`. The allowlists are baked
 into the image and the proxy's rootfs is read-only, so an edit in the checkout
 plus `proxy reload` does not reach the running proxy on its own.
+
+## Plugins that download binaries at runtime
+
+Installing through the egress window only covers what the install itself
+fetches. A plugin that downloads a binary the first time it *runs* hits the
+closed proxy instead, usually as a non-blocking hook error at every session
+start.
+
+The impeccable plugin is one of these: its launcher fetches a native engine
+from GitHub releases. The base image bakes that engine in as
+`/usr/local/bin/impeccable`, which the launcher finds before it tries to
+download. Its version is pinned as `IMPECCABLE_ENGINE_VERSION` in
+`versions.env`. When a plugin update changes
+`skills/impeccable/scripts/VERSION`, bump the pin (and the matching `ARG`
+default in `base/Dockerfile`) and rebuild. Until then the launcher uses the
+older baked engine rather than failing.
 
 ## Moving plugins to another machine
 

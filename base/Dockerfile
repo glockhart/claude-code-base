@@ -54,6 +54,34 @@ RUN set -eux; \
       *) echo "installed '$installed', expected ${CLAUDE_CODE_VERSION}" >&2; exit 1 ;; \
     esac
 
+# --- impeccable engine -------------------------------------------------------
+# The impeccable plugin is a shell launcher around a native binary it downloads
+# from GitHub on first run. The sandbox denies github.com, so that download
+# fails at every hook and every skill verb. The launcher probes PATH before it
+# tries to download, so a binary here is all it takes. Checked against the
+# release's .sha256 sidecar, the same check the launcher itself applies. The
+# default matches versions.env, so CI builds get it without a build-arg.
+ARG IMPECCABLE_ENGINE_VERSION=0.1.6
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) arch=x64 ;; \
+      arm64) arch=arm64 ;; \
+      *) echo "no impeccable engine for ${TARGETARCH:-unknown}" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/pbakaus/impeccable/releases/download/engine-v${IMPECCABLE_ENGINE_VERSION}/impeccable-linux-${arch}"; \
+    curl -fsSL --retry 3 -o /tmp/impeccable "$url"; \
+    curl -fsSL --retry 3 -o /tmp/impeccable.sha256 "$url.sha256"; \
+    printf '%s  /tmp/impeccable\n' "$(cut -d' ' -f1 /tmp/impeccable.sha256)" >/tmp/impeccable.check; \
+    sha256sum -c /tmp/impeccable.check; \
+    install -m 0555 /tmp/impeccable /usr/local/bin/impeccable; \
+    rm -f /tmp/impeccable /tmp/impeccable.sha256 /tmp/impeccable.check; \
+    probe=$(impeccable engine-probe); \
+    case "$probe" in \
+      impeccable-engine*) ;; \
+      *) echo "engine-probe answered '$probe'" >&2; exit 1 ;; \
+    esac
+
 # --- identity ----------------------------------------------------------------
 # The node image already ships a `node` user at 1000:1000. Rename it rather than
 # creating a second 1000, which would make the uid ambiguous.
