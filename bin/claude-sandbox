@@ -8,7 +8,7 @@
 #   claude-sandbox proxy up|down|logs|reload
 #   claude-sandbox plugins install URL|owner/repo [plugin...]
 #   claude-sandbox plugins export [FILE] | plugins import FILE | plugins list
-#   claude-sandbox pull | config
+#   claude-sandbox pull | config | version | update
 #   claude-sandbox login | logout | doctor
 #
 # Flags:
@@ -73,6 +73,11 @@ load_config "$ROOT/versions.env"
 : "${PROXY_SUBNET:=10.99.0.0/24}"
 : "${PROXY_GATEWAY:=10.99.0.1}"
 : "${AUTH_VOLUME:=claude-sandbox-auth}"
+
+# Which published release this copy is. The publish workflow stamps the tag in
+# here; a checkout says dev. Plain assignment, not a default: it describes this
+# file, so no config file or environment gets to override it.
+CLAUDE_SANDBOX_RELEASE=dev
 
 # Set only by `plugins install`, for the life of one command. Everything else
 # runs with the allowlist baked into the proxy image.
@@ -413,7 +418,7 @@ case ${1-} in
     # Print what this machine actually resolved. Configuration comes from four
     # places, so "it behaves differently over here" is nearly always answered
     # by diffing this output between two hosts.
-    for v in CLAUDE_CODE_VERSION BASE_IMAGE_NAME PROXY_IMAGE_NAME PROXY_IMAGE_TAG \
+    for v in CLAUDE_SANDBOX_RELEASE CLAUDE_CODE_VERSION BASE_IMAGE_NAME PROXY_IMAGE_NAME PROXY_IMAGE_TAG \
              REGISTRY NET_ISOLATED NET_EXTERNAL PROXY_NAME PROXY_IP PROXY_PORT \
              PROXY_SUBNET AUTH_VOLUME; do
       printf '%s=%s\n' "$v" "${!v}"
@@ -421,6 +426,21 @@ case ${1-} in
     printf 'CONFIG_FILE=%s\n' "$([ -f "$HOME/.config/claude-sandbox/config" ] && echo "$HOME/.config/claude-sandbox/config" || echo "(none)")"
     printf 'VERSIONS_ENV=%s\n' "$([ -f "$ROOT/versions.env" ] && echo "$ROOT/versions.env" || echo "(none, using built-in defaults)")"
     exit 0 ;;
+  version)
+    printf 'release %s\nclaude-code %s\n' "$CLAUDE_SANDBOX_RELEASE" "$CLAUDE_CODE_VERSION"
+    exit 0 ;;
+  update) shift
+    # Re-run the published installer against the directory this copy lives in,
+    # so an update replaces this file rather than landing a second one on PATH.
+    # A checkout, including a `make install` symlink into one, updates with git.
+    [ ! -f "$ROOT/versions.env" ] || die "this copy runs from a checkout at $ROOT; update it with git pull"
+    url=${CLAUDE_SANDBOX_INSTALLER_URL:-https://github.com/glockhart/claude-code-base/releases/latest/download/install.sh}
+    # Download whole before running, so a dropped connection runs nothing.
+    if command -v curl >/dev/null 2>&1; then installer=$(curl -fsSL "$url") || die "could not download $url"
+    elif command -v wget >/dev/null 2>&1; then installer=$(wget -qO- "$url") || die "could not download $url"
+    else die "need curl or wget"
+    fi
+    CLAUDE_SANDBOX_INSTALL_DIR=$(cd -P "$(dirname "$SELF")" && pwd) exec bash -c "$installer" ;;
   pull)
     # Deliberately NOT ensure_image: that returns early when the image already
     # exists locally, which made `pull` a no-op on exactly the machines that

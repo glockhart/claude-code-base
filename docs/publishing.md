@@ -5,12 +5,21 @@ request merges to `main`. Nothing publishes from a branch, and nothing
 publishes from a developer machine.
 
 ```
-ghcr.io/glockhart/claude-code-base:2.1.278
+ghcr.io/glockhart/claude-code-base:2.1.282
 ghcr.io/glockhart/claude-sandbox-proxy:1
 ```
 
 Each also carries a `sha-<short>` tag and `latest`. The packages are public, so
 they pull anonymously.
+
+Once both images are tagged, the same run publishes the launcher as a GitHub
+Release, tagged `v<agent version>-sha-<short>` (for example
+`v2.1.282-sha-3eb0788`) and marked latest. Its assets are `claude-sandbox`,
+`install.sh` and a `.sha256` for each. The install one-liner fetches
+`releases/latest/download/install.sh`, a fixed URL that always redirects to the
+newest release. The released `claude-sandbox` has the tag stamped into
+`CLAUDE_SANDBOX_RELEASE`, so `claude-sandbox version` names it; a checkout says
+`dev`.
 
 ## One manual step after the first publish
 
@@ -59,7 +68,7 @@ capabilities, and none of those weaken by being known. See
 | Event | Workflow | Result |
 |---|---|---|
 | Pull request | `ci.yml` | Lint, build both images, run both suites. Publishes nothing, and has `contents: read` only so it cannot |
-| Push to `main` | `publish.yml` | Same checks, then build both images for both architectures and publish |
+| Push to `main` | `publish.yml` | Same checks, then build both images for both architectures and publish, then release the launcher |
 | Manual | either | `workflow_dispatch` |
 
 A merged pull request is a push to `main`, whether merged, squashed or rebased,
@@ -67,7 +76,7 @@ so merging is what triggers a publish.
 
 ## How the publish is built
 
-Five jobs:
+Five jobs, in order:
 
 1. **meta** reads the tags out of `versions.env` once, so nothing downstream
    parses it again or hardcodes a version.
@@ -77,6 +86,12 @@ Five jobs:
    runner, each pushing by digest.
 4. **merge** stitches the per-platform digests into one manifest list per image
    and applies the tags. Until this runs, the pushed digests are untagged.
+5. **release** stamps the tag into a copy of `bin/claude-sandbox`, writes the
+   checksums, signs a provenance attestation for the launcher and installer,
+   and creates the GitHub Release. It runs only on `main` and only after
+   **merge**, so a newly installed launcher never names an image that is not
+   there yet. It is the only job with `contents: write`.
+
 There is deliberately **no prune job**. See the storage section below.
 
 Native arm64 runners are used rather than emulation. The base image build runs
@@ -134,6 +149,17 @@ storage question above is settled.
 **Re-pushing the same version tag is expected.** Any merge republishes the
 current version unless it was bumped. The commit SHA tag is what distinguishes
 two builds of one version, which is the reason it exists.
+
+**Every merge makes a release.** The tag includes the commit, so releases
+accumulate, one per merge. Nothing depends on the old ones except someone who
+pinned `CLAUDE_SANDBOX_VERSION`, so prune from the Releases page whenever you
+like. Deleting a release does not touch the images.
+
+**The installer is only as good as `main`.** Anyone running the one-liner gets
+whatever last merged, straight into a shell. The checksums catch a corrupted
+download, not a malicious commit, because they come from the same place. The
+attestation proves which workflow run built a file, not that the commit was
+reviewed. Branch protection on `main` is what actually guards this.
 
 **Private repositories consume Actions minutes.** Unlike public ones, every
 minute counts against the account allowance and then bills per minute. Layer

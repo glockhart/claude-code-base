@@ -45,7 +45,7 @@ install: ## Symlink bin/claude-sandbox into ~/.local/bin
 lint: ## shellcheck the scripts, hadolint the Dockerfiles
 	@fail=0; \
 	if command -v shellcheck >/dev/null; then \
-	  shellcheck --severity=warning bin/claude-sandbox base/entrypoint.sh \
+	  shellcheck --severity=warning bin/claude-sandbox install.sh base/entrypoint.sh \
 	    base/rootfs/usr/local/bin/* proxy/healthcheck.sh test/*.sh || fail=1; \
 	else \
 	  echo "shellcheck not installed"; [ -z "$${CI:-}" ] || fail=1; \

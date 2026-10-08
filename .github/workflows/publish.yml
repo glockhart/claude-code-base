@@ -199,3 +199,62 @@ jobs:
   # Untagged digests do still accumulate on every push and bill as storage on a
   # private package. See docs/publishing.md for how to prune deliberately once
   # the storage question below is settled.
+  
+# Publish the launcher and its installer as assets on a GitHub Release, which
+  # is what `curl …/releases/latest/download/install.sh | bash` resolves to.
+  # Runs only after both images are tagged, so a freshly installed script never
+  # names an image that is not there yet. Write access is scoped to this job.
+  release:
+    timeout-minutes: 10
+    needs: [meta, merge]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write       # create the release and tag
+      id-token: write       # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Assemble the assets
+        id: dist
+        env:
+          TAG: v${{ needs.meta.outputs.base_version }}-${{ needs.meta.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          sed "s/^CLAUDE_SANDBOX_RELEASE=dev\$/CLAUDE_SANDBOX_RELEASE=$TAG/" bin/claude-sandbox > dist/claude-sandbox
+          # A sed that matches nothing succeeds silently and ships a "dev" copy.
+          grep -qx "CLAUDE_SANDBOX_RELEASE=$TAG" dist/claude-sandbox \
+            || { echo "::error::release stamp not applied to bin/claude-sandbox"; exit 1; }
+          cp install.sh dist/install.sh
+          chmod 0755 dist/claude-sandbox dist/install.sh
+          # Bare filenames, so `sha256sum -c` works from the download directory.
+          (cd dist && for f in claude-sandbox install.sh; do sha256sum "$f" > "$f.sha256"; done)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/claude-sandbox
+            dist/install.sh
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.dist.outputs.tag }}
+          OWNER: ${{ github.repository_owner }}
+          BASE_VERSION: ${{ needs.meta.outputs.base_version }}
+          PROXY_VERSION: ${{ needs.meta.outputs.proxy_version }}
+        run: |
+          set -euo pipefail
+          read_var() { sed -n "s/^$1=\(.*\)\$/\1/p" versions.env | tail -n1; }
+          base="ghcr.io/$OWNER/$(read_var BASE_IMAGE_NAME):$BASE_VERSION"
+          proxy="ghcr.io/$OWNER/$(read_var PROXY_IMAGE_NAME):$PROXY_VERSION"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh"
+          notes=$(printf 'Install or update:\n\n```bash\ncurl -fsSL %s | bash\n```\n\nImages:\n\n- `%s`\n- `%s`\n' "$url" "$base" "$proxy")
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "$notes" --latest

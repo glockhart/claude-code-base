@@ -21,24 +21,48 @@ make login            # one-time; run /login and paste the code back
 cd ~/git/some-project && claude-sandbox
 ```
 
-## On every other machine, just the script
+## On every other machine, one command
 
 `bin/claude-sandbox` is standalone. It carries its own defaults and manages the
 proxy with plain docker, so it needs no checkout, no Makefile and no compose
-file. Copy the one file and go:
+file. Install it with:
 
 ```bash
-scp bin/claude-sandbox other-host:~/.local/bin/
-ssh other-host
+curl -fsSL https://github.com/glockhart/claude-code-base/releases/latest/download/install.sh | bash
+# or
+wget -qO- https://github.com/glockhart/claude-code-base/releases/latest/download/install.sh | bash
+```
+
+then:
+
+```bash
 claude-sandbox pull      # fetches both images, no registry login needed
 claude-sandbox login     # one-time Anthropic sign-in
 cd ~/some-project && claude-sandbox
 ```
 
+To update, run the same one-liner again, or `claude-sandbox update`, then
+`claude-sandbox pull`. `claude-sandbox version` shows which release you have.
+
+The installer puts one file in `~/.local/bin` (set
+`CLAUDE_SANDBOX_INSTALL_DIR` to change that), needs no sudo, and checks the
+script's sha256 before installing it. Set `CLAUDE_SANDBOX_VERSION=<tag>` to pin
+a release. It will not replace a `make install` symlink, since that copy
+updates with `git pull`.
+
+If you would rather not pipe into a shell, check the installer's provenance
+first. Every release is signed by the workflow that built it:
+
+```bash
+curl -fsSLO https://github.com/glockhart/claude-code-base/releases/latest/download/install.sh
+gh attestation verify install.sh --repo glockhart/claude-code-base
+bash install.sh
+```
+
 The images are published to GitHub Container Registry by Actions on merge to
-main, and `REGISTRY` already points there. The packages are public, so pulls
-need no registry authentication at all. See
-[docs/publishing.md](docs/publishing.md).
+main, and the launcher to GitHub Releases straight after. `REGISTRY` already
+points at the registry, and the packages are public, so pulls need no registry
+authentication at all. See [docs/publishing.md](docs/publishing.md).
 
 Configuration precedence, highest first: environment variables, then
 `~/.config/claude-sandbox/config`, then `versions.env` if the script happens to
@@ -91,6 +115,8 @@ anything itself, so the resolver points at an address with nothing on port 53.
 | `claude-sandbox doctor` | Check this host is set up correctly |
 | `claude-sandbox pull` | Fetch both images from the configured registry |
 | `claude-sandbox config` | Print what this machine actually resolved |
+| `claude-sandbox version` | Which release this copy is, and the agent version it runs |
+| `claude-sandbox update` | Install the latest release over this copy |
 
 ## What is not in the container
 
