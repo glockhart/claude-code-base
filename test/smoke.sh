@@ -200,4 +200,49 @@ wait "$pid"; st=$?
 [ "$st" = 3 ] && pass "a git config change during the session exits 3" \
   || fail "tampering was not reported (exit $st)"
 rm -rf "$gt"
+
+head_ "10. The installer"
+# Runs install.sh against a fake release on disk, built the way the publish
+# workflow builds the real one. curl reads file:// URLs; wget does not.
+if command -v curl >/dev/null 2>&1; then
+  rel=$(mktemp -d); dst=$(mktemp -d)
+  sum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+  sed 's/^CLAUDE_SANDBOX_RELEASE=dev$/CLAUDE_SANDBOX_RELEASE=vtest/' "$ROOT/bin/claude-sandbox" > "$rel/claude-sandbox"
+  (cd "$rel" && sum claude-sandbox > claude-sandbox.sha256)
+  inst() { CLAUDE_SANDBOX_BASE_URL="file://$rel" CLAUDE_SANDBOX_INSTALL_DIR="$dst/bin" bash "$ROOT/install.sh" >/dev/null 2>&1; }
+  ver() { bash "$dst/bin/claude-sandbox" version 2>/dev/null | sed -n 's/^release //p'; }
+
+  inst && [ -n "$(find "$dst/bin/claude-sandbox" -perm -100)" ] && [ "$(ver)" = vtest ] \
+    && pass "installs an executable launcher that reports its release" \
+    || fail "fresh install did not produce a working launcher"
+
+  sed -i.bak 's/^CLAUDE_SANDBOX_RELEASE=vtest$/CLAUDE_SANDBOX_RELEASE=vtest2/' "$rel/claude-sandbox"
+  (cd "$rel" && sum claude-sandbox > claude-sandbox.sha256)
+  inst && [ "$(ver)" = vtest2 ] && pass "re-running updates in place" \
+    || fail "re-running did not update the launcher"
+  [ -z "$(find "$dst/bin" -name '.claude-sandbox.tmp.*')" ] \
+    && pass "no staging file left behind" || fail "staging file left in the install dir"
+
+  echo "0000000000000000000000000000000000000000000000000000000000000000  claude-sandbox" > "$rel/claude-sandbox.sha256"
+  ! inst && [ "$(ver)" = vtest2 ] \
+    && pass "a checksum mismatch installs nothing and keeps the old copy" \
+    || fail "installer accepted a file that failed its checksum"
+  (cd "$rel" && sum claude-sandbox > claude-sandbox.sha256)
+
+  rm -f "$dst/bin/claude-sandbox"; ln -s "$ROOT/bin/claude-sandbox" "$dst/bin/claude-sandbox"
+  ! inst && [ -L "$dst/bin/claude-sandbox" ] \
+    && pass "refuses to replace a make-install symlink" \
+    || fail "replaced a make-install symlink without CLAUDE_SANDBOX_FORCE"
+  rm -f "$dst/bin/claude-sandbox"
+
+  half=$(( $(wc -c < "$ROOT/install.sh") / 2 ))
+  head -c "$half" "$ROOT/install.sh" \
+    | CLAUDE_SANDBOX_BASE_URL="file://$rel" CLAUDE_SANDBOX_INSTALL_DIR="$dst/bin" bash >/dev/null 2>&1
+  [ ! -e "$dst/bin/claude-sandbox" ] \
+    && pass "a truncated download runs nothing" \
+    || fail "a truncated installer still installed the launcher"
+  rm -rf "$rel" "$dst"
+else
+  skip "curl not installed; the installer tests read file:// URLs"
+fi
 summary
